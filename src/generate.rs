@@ -83,6 +83,7 @@ mod ffi {
         unsafe fn Fr_isTrue(a: *mut FrElement) -> bool;
         // fn Fr_fromBool(to: &mut FrElement, a: bool);
         unsafe fn Fr_toInt(a: *mut FrElement) -> u64;
+        unsafe fn Fr_land(to: *mut FrElement, a: *const FrElement, b: *const FrElement);
         unsafe fn Fr_lor(to: *mut FrElement, a: *const FrElement, b: *const FrElement);
         unsafe fn print(a: *mut FrElement);
         // fn Fr_pow(to: &mut FrElement, a: &FrElement, b: &FrElement);
@@ -208,14 +209,17 @@ pub fn get_iosignals() -> Vec<InputOutputList> {
 
 /// Run cpp witness generator and optimize graph
 pub fn build_witness() -> eyre::Result<()> {
+    println!("get_total_signal_no: {}", ffi::get_total_signal_no());
+    println!("get_main_input_signal_no: {}", ffi::get_main_input_signal_no());
+    println!("get_main_input_signal_start: {}", ffi::get_main_input_signal_start());
     let mut signal_values = vec![field::undefined(); ffi::get_total_signal_no() as usize];
     signal_values[0] = field::constant(uint!(1_U256));
 
     let total_input_len =
         (ffi::get_main_input_signal_no() + ffi::get_main_input_signal_start()) as usize;
 
-    for i in 0..total_input_len {
-        signal_values[i + 1] = field::input(i + 1, uint!(0_U256));
+    for i in 1..total_input_len {
+        signal_values[i] = field::input(i, uint!(0_U256));
     }
 
     let mut ctx = ffi::Circom_CalcWit {

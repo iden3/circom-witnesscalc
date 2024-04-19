@@ -208,6 +208,10 @@ pub unsafe fn Fr_geq(to: *mut FrElement, a: *const FrElement, b: *const FrElemen
     binop(Operation::Geq, to, a, b);
 }
 
+pub unsafe fn Fr_land(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
+    binop(Operation::Land, to, a, b);
+}
+
 pub unsafe fn Fr_lor(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Lor, to, a, b);
 }
