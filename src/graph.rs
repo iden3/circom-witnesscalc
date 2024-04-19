@@ -48,6 +48,7 @@ pub enum Operation {
     Shl,
     Shr,
     Band,
+    Neg,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -57,6 +58,7 @@ pub enum Node {
     #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
     MontConstant(Fr),
     Op(Operation, usize, usize),
+    UnoOp(Operation, usize),
 }
 
 impl Operation {
@@ -78,6 +80,13 @@ impl Operation {
             Shr => compute_shr_uint(a, b),
             Band => a.bitand(b),
             _ => unimplemented!("operator {:?} not implemented", self),
+        }
+    }
+
+    pub fn eval_uno(&self, a: U256) -> U256 {
+        match self {
+            Operation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
+            _ => unimplemented!("operator {:?} not implemented for UNO operation", self),
         }
     }
 
@@ -110,6 +119,8 @@ fn assert_valid(nodes: &[Node]) {
         if let Node::Op(_, a, b) = node {
             assert!(a < i);
             assert!(b < i);
+        } else if let Node::UnoOp(_, a) = node {
+            assert!(a < i);
         }
     }
 }
@@ -134,6 +145,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
             Node::MontConstant(c) => c,
             Node::Input(i) => Fr::new(inputs[i].into()),
             Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
+            Node::UnoOp(op, a) => unimplemented!("operator {:?} not implemented for Montgomery", op),
         };
         values.push(value);
     }
@@ -168,6 +180,11 @@ pub fn propagate(nodes: &mut [Node]) {
                     constants += 1;
                 }
             }
+        } else if let Node::UnoOp(op, a) = nodes[i] {
+            if let Node::Constant(va) = nodes[a] {
+                nodes[i] = Node::Constant(op.eval_uno(va));
+                constants += 1;
+            }
         }
     }
 
@@ -190,6 +207,9 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
             if let Node::Op(_, a, b) = nodes[i] {
                 used[a] = true;
                 used[b] = true;
+            }
+            if let Node::UnoOp(_, a) = nodes[i] {
+                used[a] = true;
             }
         }
     }
@@ -220,6 +240,9 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
             *a = renumber[*a].unwrap();
             *b = renumber[*b].unwrap();
         }
+        if let Node::UnoOp(_, a) = node {
+            *a = renumber[*a].unwrap();
+        }
     }
     for output in outputs.iter_mut() {
         *output = renumber[*output].unwrap();
@@ -234,6 +257,7 @@ fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
     let mut values = Vec::with_capacity(nodes.len());
     let mut inputs = HashMap::new();
     let mut prfs = HashMap::new();
+    let mut prfs_uno = HashMap::new();
     for node in nodes.iter() {
         use Operation::*;
         let value = match node {
@@ -252,6 +276,9 @@ fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
             Node::Input(i) => *inputs.entry(*i).or_insert_with(|| rng.gen::<U256>() % M),
             Node::Op(op, a, b) => *prfs
                 .entry((*op, values[*a], values[*b]))
+                .or_insert_with(|| rng.gen::<U256>() % M),
+            Node::UnoOp(op, a) => *prfs_uno
+                .entry((*op, values[*a]))
                 .or_insert_with(|| rng.gen::<U256>() % M),
         };
         values.push(value);
@@ -283,6 +310,9 @@ pub fn value_numbering(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
         if let Node::Op(_, a, b) = node {
             *a = renumber[*a];
             *b = renumber[*b];
+        }
+        if let Node::UnoOp(_, a) = node {
+            *a = renumber[*a];
         }
     }
     for output in outputs.iter_mut() {
@@ -325,6 +355,7 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Input(..) => (),
             Op(Add | Sub | Mul, ..) => (),
             Op(..) => unimplemented!("Operators Montgomery form"),
+            UnoOp(..) => unimplemented!("Operators Montgomery form UNO"),
         }
     }
     eprintln!("Converted to Montgomery form");

@@ -99,6 +99,25 @@ fn binop(op: Operation, to: *mut FrElement, a: *const FrElement, b: *const FrEle
     constant.push(ca && cb);
 }
 
+fn unoop(op: Operation, to: *mut FrElement, a: *const FrElement) {
+    let mut nodes = NODES.lock().unwrap();
+    let mut values = VALUES.lock().unwrap();
+    let mut constant = CONSTANT.lock().unwrap();
+    assert_eq!(nodes.len(), values.len());
+    assert_eq!(nodes.len(), constant.len());
+
+    let (a, to) = unsafe { ((*a).0, &mut (*to).0) };
+    assert!(a < nodes.len());
+    nodes.push(Node::UnoOp(op, a));
+    *to = nodes.len() - 1;
+
+    let va = values[a];
+    values.push(op.eval_uno(va));
+
+    let ca = constant[a];
+    constant.push(ca);
+}
+
 pub fn Fr_mul(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Mul, to, a, b);
 }
@@ -226,4 +245,8 @@ pub unsafe fn Fr_shr(to: *mut FrElement, a: *const FrElement, b: *const FrElemen
 
 pub unsafe fn Fr_band(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Band, to, a, b);
+}
+
+pub unsafe fn Fr_neg(to: *mut FrElement, a: *const FrElement) {
+    unoop(Operation::Neg, to, a);
 }
