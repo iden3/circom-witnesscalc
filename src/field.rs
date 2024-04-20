@@ -250,3 +250,11 @@ pub unsafe fn Fr_band(to: *mut FrElement, a: *const FrElement, b: *const FrEleme
 pub unsafe fn Fr_neg(to: *mut FrElement, a: *const FrElement) {
     unoop(Operation::Neg, to, a);
 }
+
+pub fn Fr_div(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
+    binop(Operation::Div, to, a, b);
+}
+
+pub fn Fr_idiv(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
+    binop(Operation::Idiv, to, a, b);
+}

@@ -49,6 +49,8 @@ pub enum Operation {
     Shr,
     Band,
     Neg,
+    Div,
+    Idiv,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -79,6 +81,11 @@ impl Operation {
             Shl => compute_shl_uint(a, b),
             Shr => compute_shr_uint(a, b),
             Band => a.bitand(b),
+            Div => {
+                let tmp = b.inv_mod(M).unwrap();
+                a.mul_mod(tmp, M)
+            },
+            Idiv => a / b,
             _ => unimplemented!("operator {:?} not implemented", self),
         }
     }
