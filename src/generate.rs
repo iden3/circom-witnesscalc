@@ -8,6 +8,12 @@ use ffi::InputOutputList;
 use ruint::{aliases::U256, uint};
 use serde::{Deserialize, Serialize};
 use std::{io::Read, time::Instant};
+use std::collections::HashMap;
+
+#[derive(Debug)]
+pub struct IOSignalsMap {
+    pub m: HashMap<u32, InputOutputList>,
+}
 
 #[cxx::bridge]
 mod ffi {
@@ -37,17 +43,18 @@ mod ffi {
     }
 
     #[derive(Debug)]
-    struct Circom_CalcWit {
+    struct Circom_CalcWit<'a> {
         signalValues: Vec<FrElement>,
         componentMemory: Vec<Circom_Component>,
         circuitConstants: Vec<FrElement>,
-        templateInsId2IOSignalInfoList: Vec<InputOutputList>,
+        templateInsId2IOSignalInfoList: &'a IOSignalsMap,
         listOfTemplateMessages: Vec<String>,
     }
 
     // Rust types and signatures exposed to C++.
     extern "Rust" {
         type FrElement;
+        type IOSignalsMap;
 
         fn create_vec(len: usize) -> Vec<FrElement>;
         fn create_vec_u32(len: usize) -> Vec<u32>;
@@ -88,6 +95,16 @@ mod ffi {
         unsafe fn print(a: *mut FrElement);
         // fn Fr_pow(to: &mut FrElement, a: &FrElement, b: &FrElement);
         unsafe fn Fr_idiv(to: *mut FrElement, a: *const FrElement, b: *const FrElement);
+
+        // By pointer to FrElement return an index of the element
+        // in the VALUES vector
+        unsafe fn get_element_index(a: *mut FrElement) -> usize;
+
+        // By pointer to FrElement return the BigInt value in a string
+        // representation of the element
+        unsafe fn get_value(a: *const FrElement) -> String;
+
+        fn get_signal_info(x: &IOSignalsMap, idx: u32) -> InputOutputList;
     }
 
     // C++ types and signatures exposed to Rust.
@@ -167,24 +184,25 @@ pub fn get_constants() -> Vec<FrElement> {
     return constants;
 }
 
-pub fn get_iosignals() -> Vec<InputOutputList> {
+pub fn get_iosignals() -> HashMap<u32, InputOutputList> {
+    let io_size = ffi::get_size_of_io_map() as usize;
+    let mut result: HashMap<u32, InputOutputList> = HashMap::with_capacity(io_size);
+
     if ffi::get_size_of_io_map() == 0 {
-        return vec![];
+        return result;
     }
 
     // skip the first part
     let mut bytes = &DAT_BYTES[(ffi::get_size_of_input_hashmap() as usize) * 24
         + (ffi::get_size_of_witness() as usize) * 8
         + (ffi::get_size_of_constants() as usize * 40)..];
-    let io_size = ffi::get_size_of_io_map() as usize;
-    let hashmap_size = ffi::get_size_of_input_hashmap() as usize;
-    let mut indices = vec![0usize; io_size];
-    let mut map: Vec<InputOutputList> = vec![InputOutputList::default(); hashmap_size];
+    let mut indices = vec![0u32; io_size];
 
     (0..io_size).for_each(|i| {
-        let t32 = bytes.read_u32::<LittleEndian>().unwrap() as usize;
-        indices[i] = t32;
+        indices[i] = bytes.read_u32::<LittleEndian>().unwrap();
     });
+
+    let mut result: HashMap<u32, InputOutputList> = HashMap::with_capacity(io_size);
 
     (0..io_size).for_each(|i| {
         let l32 = bytes.read_u32::<LittleEndian>().unwrap() as usize;
@@ -206,9 +224,9 @@ pub fn get_iosignals() -> Vec<InputOutputList> {
                 lengths,
             });
         });
-        map[indices[i] % hashmap_size] = io_list;
+        result.insert(indices[i], io_list);
     });
-    map
+    result
 }
 
 /// Run cpp witness generator and optimize graph
@@ -226,6 +244,8 @@ pub fn build_witness() -> eyre::Result<()> {
         signal_values[i] = field::input(i, uint!(0_U256));
     }
 
+    let ioSignals = get_iosignals();
+    let x = IOSignalsMap { m: ioSignals };
     let mut ctx = ffi::Circom_CalcWit {
         signalValues: signal_values,
         componentMemory: vec![
@@ -233,7 +253,7 @@ pub fn build_witness() -> eyre::Result<()> {
             ffi::get_number_of_components() as usize
         ],
         circuitConstants: get_constants(),
-        templateInsId2IOSignalInfoList: get_iosignals(),
+        templateInsId2IOSignalInfoList: &x,
         listOfTemplateMessages: vec![],
     };
 
@@ -289,3 +309,12 @@ pub fn build_witness() -> eyre::Result<()> {
 
     Ok(())
 }
+
+pub unsafe fn get_element_index(a: *const FrElement) -> usize {
+    return (*a).0;
+}
+
+fn get_signal_info(x: &IOSignalsMap, idx: u32) -> InputOutputList {
+    x.m.get(&idx).unwrap().clone()
+}
+

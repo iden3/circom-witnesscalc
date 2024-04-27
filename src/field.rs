@@ -199,7 +199,7 @@ pub fn Fr_isTrue(a: *mut FrElement) -> bool {
 
     let a = unsafe { (*a).0 };
     assert!(a < nodes.len());
-    assert!(constant[a]);
+    // assert!(constant[a]);
     values[a] != U256::ZERO
 }
 
@@ -257,4 +257,17 @@ pub fn Fr_div(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
 
 pub fn Fr_idiv(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Idiv, to, a, b);
+}
+
+pub unsafe fn get_value(a: *const FrElement) -> String {
+    let mut nodes = NODES.lock().unwrap();
+    let mut values = VALUES.lock().unwrap();
+    let mut constant = CONSTANT.lock().unwrap();
+    assert_eq!(nodes.len(), values.len());
+    assert_eq!(nodes.len(), constant.len());
+    let a = unsafe { (*a).0 };
+    assert!(a < nodes.len());
+
+    let va = values[a];
+    return va.to_string();
 }

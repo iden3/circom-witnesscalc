@@ -82,7 +82,7 @@ impl Operation {
             Shr => compute_shr_uint(a, b),
             Band => a.bitand(b),
             Div => {
-                let tmp = b.inv_mod(M).unwrap();
+                let tmp = b.inv_mod(M).unwrap(); // Maybe mod R?
                 a.mul_mod(tmp, M)
             },
             Idiv => a / b,
@@ -103,6 +103,8 @@ impl Operation {
             Add => a + b,
             Sub => a - b,
             Mul => a * b,
+            // Div => a / b,
+            // Shr => a.shr(b),
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
         }
     }
@@ -360,9 +362,11 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Constant(c) => *node = MontConstant(Fr::new((*c).into())),
             MontConstant(..) => (),
             Input(..) => (),
+            // Op(Add | Sub | Mul | Div | Shr | Band , ..) => (),
             Op(Add | Sub | Mul, ..) => (),
-            Op(..) => unimplemented!("Operators Montgomery form"),
-            UnoOp(..) => unimplemented!("Operators Montgomery form UNO"),
+            Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
+            // UnoOp(Neg, ..) => (),
+            UnoOp(op, ..) => unimplemented!("Operators Montgomery form UNO: {:?}", op),
         }
     }
     eprintln!("Converted to Montgomery form");
