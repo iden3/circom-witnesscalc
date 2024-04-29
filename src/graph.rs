@@ -5,7 +5,7 @@ use std::{
 
 use crate::field::M;
 use ark_bn254::Fr;
-use ark_ff::PrimeField;
+use ark_ff::{BigInt, Field, PrimeField, BigInteger, Zero};
 use rand::Rng;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -103,8 +103,9 @@ impl Operation {
             Add => a + b,
             Sub => a - b,
             Mul => a * b,
+            Shr => shr(a, b),
+            Band => bit_and(a, b),
             // Div => a / b,
-            // Shr => a.shr(b),
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
         }
     }
@@ -363,11 +364,63 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             MontConstant(..) => (),
             Input(..) => (),
             // Op(Add | Sub | Mul | Div | Shr | Band , ..) => (),
-            Op(Add | Sub | Mul, ..) => (),
+            Op(Add | Sub | Mul | Shr | Band, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
             // UnoOp(Neg, ..) => (),
             UnoOp(op, ..) => unimplemented!("Operators Montgomery form UNO: {:?}", op),
         }
     }
     eprintln!("Converted to Montgomery form");
+}
+
+fn shr(a: Fr, b: Fr) -> Fr {
+    if b.is_zero() {
+        return a;
+    }
+
+    match b.cmp(&Fr::from(254u64)) {
+        std::cmp::Ordering::Equal  => {return Fr::zero()},
+        std::cmp::Ordering::Greater => {return Fr::zero()},
+        _ => (),
+    };
+
+    let mut n = b.into_bigint().to_bytes_le()[0];
+    let mut result = a.into_bigint();
+    let c = result.as_mut();
+    while n >= 64 {
+        for i in 0..3 {
+            c[i as usize] = c[(i + 1) as usize];
+        }
+        c[3] = 0;
+        n -= 64;
+    }
+
+    if n == 0 {
+        return Fr::from_bigint(result).unwrap();
+    }
+
+    let mask:u64 = (1<<n) - 1;
+    let mut carrier: u64 = c[3] & mask;
+    c[3] >>= n;
+    for i in (0..3).rev() {
+        let new_carrier = c[i] & mask;
+        c[i] = (c[i] >> n) | (carrier << (64 - n));
+        carrier = new_carrier;
+    }
+    Fr::from_bigint(result).unwrap()
+}
+
+fn bit_and(a: Fr, b: Fr) -> Fr {
+    let a = a.into_bigint();
+    let b = b.into_bigint();
+    let mut c: [u64; 4] = [0; 4];
+    for i in 0..4 {
+        c[i] = a.0[i] & b.0[i];
+    }
+    let mut d: BigInt<4> = BigInt::new(c);
+    if d > Fr::MODULUS {
+        d.sub_with_borrow(&Fr::MODULUS);
+    }
+
+    Fr::from_bigint(d).unwrap()
 }
