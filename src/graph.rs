@@ -2,6 +2,7 @@ use std::{
     collections::HashMap,
     ops::{BitAnd, Shl, Shr},
 };
+use std::collections::HashSet;
 
 use crate::field::M;
 use ark_bn254::Fr;
@@ -81,10 +82,7 @@ impl Operation {
             Shl => compute_shl_uint(a, b),
             Shr => compute_shr_uint(a, b),
             Band => a.bitand(b),
-            Div => {
-                let tmp = b.inv_mod(M).unwrap(); // Maybe mod R?
-                a.mul_mod(tmp, M)
-            },
+            Div => a.mul_mod(b.inv_mod(M).unwrap(), M),
             Idiv => a / b,
             _ => unimplemented!("operator {:?} not implemented", self),
         }
@@ -105,8 +103,19 @@ impl Operation {
             Mul => a * b,
             Shr => shr(a, b),
             Band => bit_and(a, b),
-            // Div => a / b,
+            Div => a / b,
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
+        }
+    }
+
+    pub fn eval_fr_uno(&self, a: Fr) -> Fr {
+        match self {
+            Operation::Neg => if a.is_zero() { Fr::zero() } else {
+                let mut x = Fr::MODULUS;
+                x.sub_with_borrow(&a.into_bigint());
+                Fr::from_bigint(x).unwrap()
+            },
+            _ => unimplemented!("operator {:?} not implemented for UNO operation", self),
         }
     }
 }
@@ -155,7 +164,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
             Node::MontConstant(c) => c,
             Node::Input(i) => Fr::new(inputs[i].into()),
             Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
-            Node::UnoOp(op, a) => unimplemented!("operator {:?} not implemented for Montgomery", op),
+            Node::UnoOp(op, a) => op.eval_fr_uno(values[a]),
         };
         values.push(value);
     }
@@ -166,7 +175,51 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
         out[i] = U256::try_from(values[outputs[i]].into_bigint()).unwrap();
     }
 
+    // Trace the calculation of the signal
+    // println!("output 1 signal {}", outputs[1]);
+    // trace_signal(outputs[1], nodes, &values);
+
     out
+}
+
+fn trace_signal_with_seen(i: usize, nodes: &[Node], values: &Vec<Fr>,
+                          seen: &mut HashSet<usize>) {
+
+    if seen.contains(&i) {
+        println!("at [{}]: cycle detected", i);
+        return;
+    }
+
+    seen.insert(i);
+
+    match nodes[i] {
+        Node::Input(a) => {
+            println!("at [{}]: input({}): {}", i, a, values[i].to_string());
+        },
+        Node::Constant(a) => {
+            println!("at [{}]: constant {}", i, a.to_string());
+        },
+        Node::MontConstant(a) => {
+            println!("at [{}]: montgomery constant {}", i, a.into_bigint().to_string());
+        },
+        Node::Op(op, a, b) => {
+            println!("at [{}]: operation {:?} between [{}] ({}) and [{}] ({}): {}",
+                     i, op, a, values[a].to_string(), b, values[b].to_string(),
+                     values[i].to_string());
+            trace_signal_with_seen(a, nodes, values, seen);
+            trace_signal_with_seen(b, nodes, values, seen);
+        },
+        Node::UnoOp(op, a) => {
+            println!("at [{}]: unary operation {:?} on [{}] ({}): {}",
+                     i, op, a, values[a].to_string(), values[i].to_string());
+            trace_signal_with_seen(a, nodes, values, seen);
+        },
+    }
+}
+
+pub fn trace_signal(i: usize, nodes: &[Node], values: &Vec<Fr>) {
+    let mut seen: HashSet<usize> = HashSet::new();
+    trace_signal_with_seen(i, &nodes, &values, &mut seen);
 }
 
 /// Constant propagation
@@ -363,10 +416,9 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Constant(c) => *node = MontConstant(Fr::new((*c).into())),
             MontConstant(..) => (),
             Input(..) => (),
-            // Op(Add | Sub | Mul | Div | Shr | Band , ..) => (),
-            Op(Add | Sub | Mul | Shr | Band, ..) => (),
+            Op(Add | Sub | Mul | Shr | Band | Div, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
-            // UnoOp(Neg, ..) => (),
+            UnoOp(Neg, ..) => (),
             UnoOp(op, ..) => unimplemented!("Operators Montgomery form UNO: {:?}", op),
         }
     }

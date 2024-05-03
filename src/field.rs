@@ -1,6 +1,8 @@
 use crate::graph::{Node, Operation};
 use ruint::{aliases::U256, uint};
 use std::{ptr, sync::Mutex};
+use std::collections::HashSet;
+use ark_bn254::Fr;
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -270,4 +272,45 @@ pub unsafe fn get_value(a: *const FrElement) -> String {
 
     let va = values[a];
     return va.to_string();
+}
+
+fn trace_signal_locked(i: usize, nodes: &Vec<Node>, values: &Vec<U256>, seen: &mut HashSet<usize>) {
+    if seen.contains(&i) {
+        println!("at [{}]: cycle detected", i);
+        return;
+    }
+
+    seen.insert(i);
+
+    match nodes[i] {
+        Node::Input(a) => {
+            println!("at [{}]: input({}): {}", i, a, values[i].to_string());
+        },
+        Node::Constant(a) => {
+            println!("at [{}]: constant {}", i, a.to_string());
+        },
+        Node::MontConstant(Fr) => {
+            panic!("Montgomery constant not supported");
+        },
+        Node::Op(op, a, b) => {
+            println!("at [{}]: operation {:?} between [{}] ({}) and [{}] ({}): {}",
+                     i, op, a, values[a].to_string(), b, values[b].to_string(),
+                     values[i].to_string());
+            trace_signal_locked(a, nodes, values, seen);
+            trace_signal_locked(b, nodes, values, seen);
+        },
+        Node::UnoOp(op, a) => {
+            println!("at [{}]: unary operation {:?} on [{}] ({}): {}",
+                     i, op, a, values[a].to_string(), values[i].to_string());
+            trace_signal_locked(a, nodes, values, seen);
+        },
+    }
+}
+
+pub fn trace_signal(i: usize) {
+    let nodes = NODES.lock().unwrap();
+    let values = VALUES.lock().unwrap();
+
+    let mut seen: HashSet<usize> = HashSet::new();
+    trace_signal_locked(i, &nodes, &values, &mut seen);
 }
