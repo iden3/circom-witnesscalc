@@ -120,6 +120,27 @@ fn unoop(op: Operation, to: *mut FrElement, a: *const FrElement) {
     constant.push(ca);
 }
 
+fn tresop(op: Operation, to: *mut FrElement, a: *const FrElement, b: *const FrElement, c: *const FrElement) {
+    let mut nodes = NODES.lock().unwrap();
+    let mut values = VALUES.lock().unwrap();
+    let mut constant = CONSTANT.lock().unwrap();
+    assert_eq!(nodes.len(), values.len());
+    assert_eq!(nodes.len(), constant.len());
+
+    let (a, b, c, to) = unsafe { ((*a).0, (*b).0, (*c).0, &mut (*to).0) };
+    assert!(a < nodes.len());
+    assert!(b < nodes.len());
+    assert!(c < nodes.len());
+    nodes.push(Node::TresOp(op, a, b, c));
+    *to = nodes.len() - 1;
+
+    let (va, vb, vc) = (values[a], values[b], values[c]);
+    values.push(op.eval_tres(va, vb, vc));
+
+    let (ca, cb) = (constant[a], constant[b]);
+    constant.push(ca && cb);
+}
+
 pub fn Fr_mul(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Mul, to, a, b);
 }
@@ -201,7 +222,7 @@ pub fn Fr_isTrue(a: *mut FrElement) -> bool {
 
     let a = unsafe { (*a).0 };
     assert!(a < nodes.len());
-    // assert!(constant[a]);
+    assert!(constant[a]);
     values[a] != U256::ZERO
 }
 
@@ -304,6 +325,13 @@ fn trace_signal_locked(i: usize, nodes: &Vec<Node>, values: &Vec<U256>, seen: &m
                      i, op, a, values[a].to_string(), values[i].to_string());
             trace_signal_locked(a, nodes, values, seen);
         },
+        Node::TresOp(op, a, b, c) => {
+            println!(
+                "at [{}]: tres operation {:?} on [{}] ({}), [{}] ({}) and [{}] ({}): {}",
+                i, op, a, values[a].to_string(), b, values[b].to_string(),
+                c, values[c].to_string(), values[i].to_string());
+            trace_signal_locked(a, nodes, values, seen);
+        },
     }
 }
 
@@ -313,4 +341,9 @@ pub fn trace_signal(i: usize) {
 
     let mut seen: HashSet<usize> = HashSet::new();
     trace_signal_locked(i, &nodes, &values, &mut seen);
+}
+
+pub unsafe fn tern_cond(to: *mut FrElement, a: *const FrElement,
+                    b: *const FrElement, c: *const FrElement) {
+    tresop(Operation::TernCond, to, a, b, c);
 }

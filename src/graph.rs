@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::field::M;
 use ark_bn254::Fr;
-use ark_ff::{BigInt, Field, PrimeField, BigInteger, Zero};
+use ark_ff::{BigInt, Field, PrimeField, BigInteger, Zero, One};
 use rand::Rng;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,7 @@ pub enum Operation {
     Neg,
     Div,
     Idiv,
+    TernCond,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,8 +61,9 @@ pub enum Node {
     Constant(U256),
     #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
     MontConstant(Fr),
-    Op(Operation, usize, usize),
     UnoOp(Operation, usize),
+    Op(Operation, usize, usize),
+    TresOp(Operation, usize, usize, usize),
 }
 
 impl Operation {
@@ -82,7 +84,16 @@ impl Operation {
             Shl => compute_shl_uint(a, b),
             Shr => compute_shr_uint(a, b),
             Band => a.bitand(b),
-            Div => a.mul_mod(b.inv_mod(M).unwrap(), M),
+            Div => {
+                if b == U256::ZERO {
+                    // as we are simulating a circuit execution with signals
+                    // values all equal to 0, just return 0 here in case of
+                    // division by zero
+                    U256::ZERO
+                } else {
+                    a.mul_mod(b.inv_mod(M).unwrap(), M)
+                }
+            },
             Idiv => a / b,
             _ => unimplemented!("operator {:?} not implemented", self),
         }
@@ -95,6 +106,13 @@ impl Operation {
         }
     }
 
+    pub fn eval_tres(&self, a: U256, b: U256, c: U256) -> U256 {
+        match self {
+            Operation::TernCond => if a == U256::ZERO { c } else { b },
+            _ => unimplemented!("operator {:?} not implemented for TRES operation", self),
+        }
+    }
+
     pub fn eval_fr(&self, a: Fr, b: Fr) -> Fr {
         use Operation::*;
         match self {
@@ -103,7 +121,16 @@ impl Operation {
             Mul => a * b,
             Shr => shr(a, b),
             Band => bit_and(a, b),
-            Div => a / b,
+            Div => if b.is_zero() { Fr::zero() } else { a / b },
+            // We always should return something on the circuit execution.
+            // So in case of division by 0 we would return 0. And the proof
+            // should be invalid in the end.
+            Neq => {
+                match a.cmp(&b) {
+                    std::cmp::Ordering::Equal => Fr::zero(),
+                    _ => Fr::one(),
+                }
+            },
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
         }
     }
@@ -116,6 +143,13 @@ impl Operation {
                 Fr::from_bigint(x).unwrap()
             },
             _ => unimplemented!("operator {:?} not implemented for UNO operation", self),
+        }
+    }
+
+    pub fn eval_fr_tres(&self, a: Fr, b: Fr, c: Fr) -> Fr {
+        match self {
+            Operation::TernCond => if a.is_zero() { c } else { b },
+            _ => unimplemented!("operator {:?} not implemented for TRES operation", self),
         }
     }
 }
@@ -140,6 +174,10 @@ fn assert_valid(nodes: &[Node]) {
             assert!(b < i);
         } else if let Node::UnoOp(_, a) = node {
             assert!(a < i);
+        } else if let Node::TresOp(_, a, b, c) = node {
+            assert!(a < i);
+            assert!(b < i);
+            assert!(c < i);
         }
     }
 }
@@ -165,6 +203,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
             Node::Input(i) => Fr::new(inputs[i].into()),
             Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
             Node::UnoOp(op, a) => op.eval_fr_uno(values[a]),
+            Node::TresOp(op, a, b, c) => op.eval_fr_tres(values[a], values[b], values[c]),
         };
         values.push(value);
     }
@@ -214,6 +253,13 @@ fn trace_signal_with_seen(i: usize, nodes: &[Node], values: &Vec<Fr>,
                      i, op, a, values[a].to_string(), values[i].to_string());
             trace_signal_with_seen(a, nodes, values, seen);
         },
+        Node::TresOp(op, a, b, c) => {
+            println!(
+                "at [{}]: tres operation {:?} on [{}] ({}), [{}] ({}) and [{}] ({}): {}",
+                i, op, a, values[a].to_string(), b, values[b].to_string(),
+                c, values[c].to_string(), values[i].to_string());
+            trace_signal_with_seen(a, nodes, values, seen);
+        },
     }
 }
 
@@ -248,6 +294,11 @@ pub fn propagate(nodes: &mut [Node]) {
                 nodes[i] = Node::Constant(op.eval_uno(va));
                 constants += 1;
             }
+        } else if let Node::TresOp(op, a, b, c) = nodes[i] {
+            if let (Node::Constant(va), Node::Constant(vb), Node::Constant(vc)) = (nodes[a], nodes[b], nodes[c]) {
+                nodes[i] = Node::Constant(op.eval_tres(va, vb, vc));
+                constants += 1;
+            }
         }
     }
 
@@ -273,6 +324,11 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
             }
             if let Node::UnoOp(_, a) = nodes[i] {
                 used[a] = true;
+            }
+            if let Node::TresOp(_, a, b, c) = nodes[i] {
+                used[a] = true;
+                used[b] = true;
+                used[c] = true;
             }
         }
     }
@@ -306,6 +362,11 @@ pub fn tree_shake(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
         if let Node::UnoOp(_, a) = node {
             *a = renumber[*a].unwrap();
         }
+        if let Node::TresOp(_, a, b, c) = node {
+            *a = renumber[*a].unwrap();
+            *b = renumber[*b].unwrap();
+            *c = renumber[*c].unwrap();
+        }
     }
     for output in outputs.iter_mut() {
         *output = renumber[*output].unwrap();
@@ -321,6 +382,7 @@ fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
     let mut inputs = HashMap::new();
     let mut prfs = HashMap::new();
     let mut prfs_uno = HashMap::new();
+    let mut prfs_tres = HashMap::new();
     for node in nodes.iter() {
         use Operation::*;
         let value = match node {
@@ -342,6 +404,9 @@ fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
                 .or_insert_with(|| rng.gen::<U256>() % M),
             Node::UnoOp(op, a) => *prfs_uno
                 .entry((*op, values[*a]))
+                .or_insert_with(|| rng.gen::<U256>() % M),
+            Node::TresOp(op, a, b, c) => *prfs_tres
+                .entry((*op, values[*a], values[*b], values[*c]))
                 .or_insert_with(|| rng.gen::<U256>() % M),
         };
         values.push(value);
@@ -376,6 +441,11 @@ pub fn value_numbering(nodes: &mut Vec<Node>, outputs: &mut [usize]) {
         }
         if let Node::UnoOp(_, a) = node {
             *a = renumber[*a];
+        }
+        if let Node::TresOp(_, a, b, c) = node {
+            *a = renumber[*a];
+            *b = renumber[*b];
+            *c = renumber[*c];
         }
     }
     for output in outputs.iter_mut() {
@@ -416,10 +486,12 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Constant(c) => *node = MontConstant(Fr::new((*c).into())),
             MontConstant(..) => (),
             Input(..) => (),
-            Op(Add | Sub | Mul | Shr | Band | Div, ..) => (),
+            Op(Add | Sub | Mul | Shr | Band | Div | Neq, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
             UnoOp(Neg, ..) => (),
             UnoOp(op, ..) => unimplemented!("Operators Montgomery form UNO: {:?}", op),
+            TresOp(TernCond, ..) => (),
+            TresOp(op, ..) => unimplemented!("Operators Montgomery form TRES: {:?}", op),
         }
     }
     eprintln!("Converted to Montgomery form");

@@ -105,6 +105,11 @@ mod ffi {
         unsafe fn get_value(a: *const FrElement) -> String;
 
         fn get_signal_info(x: &IOSignalsMap, idx: u32) -> InputOutputList;
+
+        // Ternary condition operator.
+        // If a is not 0 then to = b else to = c
+        unsafe fn tern_cond(to: *mut FrElement, a: *const FrElement,
+                            b: *const FrElement, c: *const FrElement);
     }
 
     // C++ types and signatures exposed to Rust.
