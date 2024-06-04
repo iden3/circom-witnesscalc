@@ -420,7 +420,7 @@ pub fn build_witness() -> eyre::Result<()> {
 
     for i in first_input_signal..total_input_len {
         // println!("set signal #{}", i);
-        signal_values[i] = field::input(i, uint!(0_U256));
+        signal_values[i] = input(i, uint!(0_U256));
     }
     // set_authV2_signals(&mut signal_values);
 

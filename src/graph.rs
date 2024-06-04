@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use crate::field::M;
 use ark_bn254::Fr;
-use ark_ff::{BigInt, Field, PrimeField, BigInteger, Zero, One};
+use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One};
 use rand::Rng;
 use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,20 @@ pub enum Node {
     Op(Operation, usize, usize),
     TresOp(Operation, usize, usize, usize),
 }
+
+// impl ToString for Node {
+//     fn to_string(&self) -> String {
+//         use Node::*;
+//         match self {
+//             Input(i) => format!("input({})", i),
+//             Constant(c) => format!("{}", c),
+//             MontConstant(c) => format!("{}", c),
+//             UnoOp(op, a) => format!("{:?}({})", op, a),
+//             Op(op, a, b) => format!("{:?}({}, {})", op, a, b),
+//             TresOp(op, a, b, c) => format!("{:?}({}, {}, {})", op, a, b, c),
+//         }
+//     }
+// }
 
 impl Operation {
     pub fn eval(&self, a: U256, b: U256) -> U256 {
@@ -389,7 +403,7 @@ fn random_eval(nodes: &mut Vec<Node>) -> Vec<U256> {
             // Constants evaluate to themselves
             Node::Constant(c) => *c,
 
-            Node::MontConstant(c) => unimplemented!("should not be used"),
+            Node::MontConstant(_) => unimplemented!("should not be used"),
 
             // Algebraic Ops are evaluated directly
             // Since the field is large, by Swartz-Zippel if

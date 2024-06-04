@@ -1,3 +1,4 @@
+#[allow(non_snake_case,dead_code)]
 mod field;
 pub mod graph;
 
@@ -111,4 +112,18 @@ pub fn calculate_witness(
         &inputs_buffer,
         &graph.signals,
     ))
+}
+
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_ok() {
+        // build_witness();
+        for i in 0..3 {
+            println!("{}", i);
+        }
+        println!("OK");
+    }
+
 }

@@ -2,7 +2,6 @@ use crate::graph::{Node, Operation};
 use ruint::{aliases::U256, uint};
 use std::{ptr, sync::Mutex};
 use std::collections::HashSet;
-use ark_bn254::Fr;
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -278,14 +277,16 @@ pub fn Fr_div(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Div, to, a, b);
 }
 
+#[allow(dead_code)]
 pub fn Fr_idiv(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {
     binop(Operation::Idiv, to, a, b);
 }
 
+#[allow(dead_code)]
 pub unsafe fn get_value(a: *const FrElement) -> String {
-    let mut nodes = NODES.lock().unwrap();
-    let mut values = VALUES.lock().unwrap();
-    let mut constant = CONSTANT.lock().unwrap();
+    let nodes = NODES.lock().unwrap();
+    let values = VALUES.lock().unwrap();
+    let constant = CONSTANT.lock().unwrap();
     assert_eq!(nodes.len(), values.len());
     assert_eq!(nodes.len(), constant.len());
     let a = unsafe { (*a).0 };
@@ -310,7 +311,7 @@ fn trace_signal_locked(i: usize, nodes: &Vec<Node>, values: &Vec<U256>, seen: &m
         Node::Constant(a) => {
             println!("at [{}]: constant {}", i, a.to_string());
         },
-        Node::MontConstant(Fr) => {
+        Node::MontConstant(_) => {
             panic!("Montgomery constant not supported");
         },
         Node::Op(op, a, b) => {
@@ -335,6 +336,7 @@ fn trace_signal_locked(i: usize, nodes: &Vec<Node>, values: &Vec<U256>, seen: &m
     }
 }
 
+#[allow(dead_code)]
 pub fn trace_signal(i: usize) {
     let nodes = NODES.lock().unwrap();
     let values = VALUES.lock().unwrap();
@@ -343,6 +345,7 @@ pub fn trace_signal(i: usize) {
     trace_signal_locked(i, &nodes, &values, &mut seen);
 }
 
+#[allow(dead_code)]
 pub unsafe fn tern_cond(to: *mut FrElement, a: *const FrElement,
                     b: *const FrElement, c: *const FrElement) {
     tresop(Operation::TernCond, to, a, b, c);
