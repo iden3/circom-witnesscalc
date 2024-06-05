@@ -117,6 +117,7 @@ fn operator_argument_instruction(
     signal_node_idx: &mut Vec<usize>,
     vars: &mut Vec<U256>,
     component_signal_start: usize,
+    subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> usize {
     match **inst {
         Instruction::Load(ref load_bucket) => {
@@ -152,8 +153,47 @@ fn operator_argument_instruction(
                         todo!()
                     }
                 },
-                _ => {
-                    panic!("not implemented");
+                AddressType::SubcmpSignal {
+                    ref cmp_address, ..
+                } => {
+                    let subcomponent_idx = calc_const_expression(cmp_address, nodes, vars);
+                    let subcomponent_idx = bigint_to_usize(subcomponent_idx);
+
+                    match load_bucket.src {
+                        LocationRule::Indexed {
+                            ref location,
+                            ref template_header,
+                        } => {
+                            let signal_idx = calc_const_expression(location, nodes, vars);
+                            let signal_idx = bigint_to_usize(signal_idx);
+                            let signal_offset = subcomponents[subcomponent_idx]
+                                .as_ref()
+                                .unwrap()
+                                .signal_offset;
+                            println!(
+                                "Load subcomponent signal: [{}] {} + {} = {}",
+                                subcomponent_idx,
+                                signal_offset,
+                                signal_idx,
+                                signal_offset + signal_idx
+                            );
+
+                            let signal_idx = subcomponents[subcomponent_idx]
+                                .as_ref()
+                                .unwrap()
+                                .signal_offset
+                                + signal_idx;
+                            let signal_node = signal_node_idx[signal_idx];
+                            assert_ne!(signal_node, usize::MAX, "signal is not set yet");
+                            return signal_node;
+                        }
+                        LocationRule::Mapped { .. } => {
+                            todo!()
+                        }
+                    }
+                }
+                AddressType::Variable => {
+                    panic!("not implemented getting operand for variable");
                 }
             }
         }
@@ -164,12 +204,30 @@ fn operator_argument_instruction(
                 signal_node_idx,
                 vars,
                 component_signal_start,
+                subcomponents,
             );
             nodes.push(node);
             return nodes.len() - 1;
         }
+        Instruction::Value(ref value_bucket) => {
+            match value_bucket.parse_as {
+                ValueType::BigInt => match nodes[value_bucket.value] {
+                    Constant(..) => {
+                        return value_bucket.value;
+                    }
+                    _ => {
+                        panic!("there is expected to be constant node");
+                    }
+                },
+                ValueType::U32 => {
+                    // in case it is a valid case, maybe we can make a
+                    // constant, add it to nodes and return its index
+                    panic!("not implemented");
+                }
+            }
+        }
         _ => {
-            panic!("not implemented");
+            panic!("not implemented for instruction: {}", inst.to_string());
         }
     }
 }
@@ -180,6 +238,7 @@ fn build_node_from_instruction(
     signal_node_idx: &mut Vec<usize>,
     vars: &mut Vec<U256>,
     component_signal_start: usize,
+    subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> Node {
     match **inst {
         Instruction::Compute(ref compute_bucket) => {
@@ -192,6 +251,7 @@ fn build_node_from_instruction(
                         signal_node_idx,
                         vars,
                         component_signal_start,
+                        subcomponents,
                     );
                     let arg2 = operator_argument_instruction(
                         &compute_bucket.stack[1],
@@ -199,6 +259,7 @@ fn build_node_from_instruction(
                         signal_node_idx,
                         vars,
                         component_signal_start,
+                        subcomponents,
                     );
                     return Node::Op(Operation::Add, arg1, arg2);
                 }
@@ -210,6 +271,7 @@ fn build_node_from_instruction(
                         signal_node_idx,
                         vars,
                         component_signal_start,
+                        subcomponents,
                     );
                     let arg2 = operator_argument_instruction(
                         &compute_bucket.stack[1],
@@ -217,6 +279,7 @@ fn build_node_from_instruction(
                         signal_node_idx,
                         vars,
                         component_signal_start,
+                        subcomponents,
                     );
                     return Node::Op(Operation::Mul, arg1, arg2);
                 }
@@ -283,10 +346,22 @@ fn process_instruction(
                                 signal_node_idx,
                                 vars,
                                 component_signal_start,
+                                subcomponents,
                             );
                             let signal_idx = calc_const_expression(location, nodes, vars);
                             let signal_idx = bigint_to_usize(signal_idx);
+                            println!(
+                                "Store signal at offset {} + {} = {}",
+                                component_signal_start,
+                                signal_idx,
+                                component_signal_start + signal_idx
+                            );
                             let signal_idx = component_signal_start + signal_idx;
+                            assert_eq!(
+                                signal_node_idx[signal_idx],
+                                usize::MAX,
+                                "signal already set"
+                            );
                             signal_node_idx[signal_idx] = node_idx;
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
@@ -350,6 +425,7 @@ fn process_instruction(
                         signal_node_idx,
                         vars,
                         component_signal_start,
+                        subcomponents,
                     );
 
                     match store_bucket.dest {
@@ -359,11 +435,23 @@ fn process_instruction(
                         } => {
                             let signal_idx = calc_const_expression(location, nodes, vars);
                             let signal_idx = bigint_to_usize(signal_idx);
-                            let signal_idx = &subcomponents[subcomponent_idx]
+                            let signal_offset = subcomponents[subcomponent_idx]
                                 .as_ref()
                                 .unwrap()
-                                .signal_offset
-                                + signal_idx;
+                                .signal_offset;
+                            println!(
+                                "Store subcomponent signal: [{}] {} + {} = {}",
+                                subcomponent_idx,
+                                signal_offset,
+                                signal_idx,
+                                signal_offset + signal_idx
+                            );
+                            let signal_idx = signal_offset + signal_idx;
+                            assert_eq!(
+                                signal_node_idx[signal_idx],
+                                usize::MAX,
+                                "subcomponent signal is already set"
+                            );
                             signal_node_idx[signal_idx] = node_idx;
                             subcomponents[subcomponent_idx]
                                 .as_mut()
@@ -375,7 +463,6 @@ fn process_instruction(
                         }
                     }
 
-                    let mut run = false;
                     let number_of_inputs = subcomponents[subcomponent_idx]
                         .as_ref()
                         .unwrap()
@@ -390,16 +477,23 @@ fn process_instruction(
                             assert!(number_of_inputs > 0);
                             false
                         }
-                        StatusInput::Unknown => number_of_inputs == 0
+                        StatusInput::Unknown => number_of_inputs == 0,
                     };
 
                     if run_component {
                         run_template(
                             templates,
-                            subcomponents[subcomponent_idx].as_ref().unwrap().template_id,
+                            subcomponents[subcomponent_idx]
+                                .as_ref()
+                                .unwrap()
+                                .template_id,
                             nodes,
                             signal_node_idx,
-                            subcomponents[subcomponent_idx].as_ref().unwrap().signal_offset)
+                            subcomponents[subcomponent_idx]
+                                .as_ref()
+                                .unwrap()
+                                .signal_offset,
+                        )
                     }
                 }
             };
@@ -423,7 +517,7 @@ fn process_instruction(
             panic!("not implemented");
         }
         Instruction::Loop(ref loop_bucket) => {
-            if check_continue_condition(&loop_bucket.continue_condition, nodes, vars) {
+            while check_continue_condition(&loop_bucket.continue_condition, nodes, vars) {
                 for i in &loop_bucket.body {
                     process_instruction(
                         i,
@@ -733,7 +827,12 @@ fn run_template(
 ) {
     let tmpl = &templates[template_id];
 
-    println!("Run template #{}: {}, body length: {}", tmpl.id, tmpl.name, tmpl.body.len());
+    println!(
+        "Run template #{}: {}, body length: {}",
+        tmpl.id,
+        tmpl.name,
+        tmpl.body.len()
+    );
 
     // print_instruction_list(&tmpl.body);
 
@@ -855,4 +954,10 @@ fn main() {
         &mut signal_node_idx,
         main_component_signal_start,
     );
+
+    for (idx, i) in signal_node_idx.into_iter().enumerate() {
+        assert_ne!(i, usize::MAX, "signal #{} is not set", idx);
+    }
+
+    println!("YAHOO")
 }
