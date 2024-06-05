@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use compiler::circuit_design::template::{TemplateCode, TemplateCodeInfo};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::ir_interface::{
@@ -12,7 +13,7 @@ use ruint::uint;
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
 use witness::graph::Node::Constant;
-use witness::graph::{Node, Operation};
+use witness::graph::{Node, Operation, optimize};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -140,7 +141,7 @@ fn operator_argument_instruction(
                             panic!("not implemented: template_header expected to be None");
                         }
                         let signal_idx = calc_const_expression(location, nodes, vars);
-                        let signal_idx = bigint_to_usize(signal_idx);
+                        let signal_idx = bigint_to_usize(&signal_idx);
                         let signal_idx = component_signal_start + signal_idx;
                         let signal_node = signal_node_idx[signal_idx];
                         assert_ne!(signal_node, usize::MAX, "signal is not set yet");
@@ -157,7 +158,7 @@ fn operator_argument_instruction(
                     ref cmp_address, ..
                 } => {
                     let subcomponent_idx = calc_const_expression(cmp_address, nodes, vars);
-                    let subcomponent_idx = bigint_to_usize(subcomponent_idx);
+                    let subcomponent_idx = bigint_to_usize(&subcomponent_idx);
 
                     match load_bucket.src {
                         LocationRule::Indexed {
@@ -165,7 +166,7 @@ fn operator_argument_instruction(
                             ref template_header,
                         } => {
                             let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(signal_idx);
+                            let signal_idx = bigint_to_usize(&signal_idx);
                             let signal_offset = subcomponents[subcomponent_idx]
                                 .as_ref()
                                 .unwrap()
@@ -349,7 +350,7 @@ fn process_instruction(
                                 subcomponents,
                             );
                             let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(signal_idx);
+                            let signal_idx = bigint_to_usize(&signal_idx);
                             println!(
                                 "Store signal at offset {} + {} = {}",
                                 component_signal_start,
@@ -407,7 +408,7 @@ fn process_instruction(
                         panic!("incorrect input information for subcomponent signal");
                     }
                     let subcomponent_idx = calc_const_expression(cmp_address, nodes, vars);
-                    let subcomponent_idx = bigint_to_usize(subcomponent_idx);
+                    let subcomponent_idx = bigint_to_usize(&subcomponent_idx);
                     print!(
                         "cmp_address = {}, is_output: {}, status: {}",
                         subcomponent_idx,
@@ -434,7 +435,7 @@ fn process_instruction(
                             ref template_header,
                         } => {
                             let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(signal_idx);
+                            let signal_idx = bigint_to_usize(&signal_idx);
                             let signal_offset = subcomponents[subcomponent_idx]
                                 .as_ref()
                                 .unwrap()
@@ -535,7 +536,7 @@ fn process_instruction(
             let sub_cmp_id =
                 calc_const_expression(&create_component_bucket.sub_cmp_id, nodes, vars);
 
-            let cmp_idx = bigint_to_usize(sub_cmp_id);
+            let cmp_idx = bigint_to_usize(&sub_cmp_id);
             assert!(
                 cmp_idx + create_component_bucket.number_of_cmp - 1 < subcomponents.len(),
                 "cmp_idx = {}, number_of_cmp = {}, subcomponents.len() = {}",
@@ -566,7 +567,7 @@ fn process_instruction(
     }
 }
 
-fn bigint_to_usize(value: U256) -> usize {
+fn bigint_to_usize(value: &U256) -> usize {
     // Convert U256 to usize
     let mut bytes = value.to_le_bytes::<32>().to_vec(); // Convert to little-endian bytes
     for i in std::mem::size_of::<usize>()..bytes.len() {
@@ -781,33 +782,20 @@ fn get_constants(circuit: &Circuit) -> Vec<Node> {
     constants
 }
 
-// Read input signals info from circuit and append them to the nodes list
-fn append_signals(circuit: &Circuit, nodes: &mut Vec<Node>) -> Vec<U256> {
-    let input_list = circuit.c_producer.get_main_input_list();
-    let mut signal_values: Vec<U256> = Vec::new();
-    signal_values.push(U256::from(1));
-    nodes.push(Node::Input(signal_values.len() - 1));
-    for (name, offset, len) in input_list {
-        for i in 0..*len {
-            signal_values.push(U256::ZERO);
-            nodes.push(Node::Input(signal_values.len() - 1));
-        }
-    }
-    return signal_values;
-}
-
 fn init_input_signals(
     circuit: &Circuit,
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
-) -> Vec<U256> {
+) -> HashMap<String, (usize, usize)> {
     let input_list = circuit.c_producer.get_main_input_list();
     let mut signal_values: Vec<U256> = Vec::new();
     signal_values.push(U256::from(1));
     nodes.push(Node::Input(signal_values.len() - 1));
     signal_node_idx[0] = nodes.len() - 1;
+    let mut inputs_info = HashMap::new();
 
     for (name, offset, len) in input_list {
+        inputs_info.insert(name.clone(), (signal_values.len(), len.clone()));
         for i in 0..*len {
             signal_values.push(U256::ZERO);
             nodes.push(Node::Input(signal_values.len() - 1));
@@ -815,7 +803,7 @@ fn init_input_signals(
         }
     }
 
-    return signal_values;
+    return inputs_info;
 }
 
 fn run_template(
@@ -861,7 +849,7 @@ fn run_template(
 fn main() {
     let version = "2.1.9";
 
-    let main_file = "/Users/alek/src/simple-circuit/circuit4.circom";
+    let main_file = "/Users/alek/src/simple-circuit/circuit3.circom";
     // let main_file = "/Users/alek/src/circuits/circuits/authV2.circom";
     let link_libraries: Vec<PathBuf> =
         vec!["/Users/alek/src/circuits/node_modules/circomlib/circuits".into()];
@@ -916,6 +904,7 @@ fn main() {
     let (_, vcp) = build_circuit(program_archive, build_config).unwrap();
 
     let main_template_id = vcp.main_id;
+    let witness_list = vcp.get_witness_list().clone();
 
     let circuit = run_compiler(
         vcp,
@@ -938,8 +927,7 @@ fn main() {
 
     let mut nodes: Vec<Node> = Vec::new();
     nodes.extend(get_constants(&circuit));
-    append_signals(&circuit, &mut nodes);
-    let signal_values = init_input_signals(&circuit, &mut nodes, &mut signal_node_idx);
+    let input_signals = init_input_signals(&circuit, &mut nodes, &mut signal_node_idx);
 
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
@@ -955,9 +943,27 @@ fn main() {
         main_component_signal_start,
     );
 
-    for (idx, i) in signal_node_idx.into_iter().enumerate() {
-        assert_ne!(i, usize::MAX, "signal #{} is not set", idx);
+    for (idx, i) in signal_node_idx.iter().enumerate() {
+        assert_ne!(i.clone(), usize::MAX, "signal #{} is not set", idx);
     }
+
+    let mut signals = witness_list.iter()
+        .map(|&i| signal_node_idx[i])
+        .collect::<Vec<_>>();
+
+    println!("number of nodes {}, signals {}", nodes.len(), signals.len());
+
+    optimize(&mut nodes, &mut signals);
+
+    println!("number of nodes after optimize {}, signals {}", nodes.len(), signals.len());
+
+    // let mut input_signals: HashMap<String, (usize, usize)> = HashMap::new();
+    // for (name, offset, len) in circuit.c_producer.get_main_input_list() {
+    //     input_signals.insert(name.clone(), (offset.clone(), len.clone()));
+    // }
+
+    let bytes = postcard::to_stdvec(&(&nodes, &signals, &input_signals)).unwrap();
+    std::fs::write("graph_v2.bin", bytes).unwrap();
 
     println!("YAHOO")
 }

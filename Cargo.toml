@@ -23,6 +23,7 @@ program_structure = { path = "../circom/program_structure" }
 parser = { path = "../circom/parser" }
 type_analysis = { path = "../circom/type_analysis" }
 constraint_generation = { path = "../circom/constraint_generation" }
+wtns-file = "0.1.5"
 
 [build-dependencies]
 cxx-build = "1.0"

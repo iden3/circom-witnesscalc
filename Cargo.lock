@@ -1887,6 +1887,16 @@ dependencies = [
  "serde",
  "serde_json",
  "type_analysis",
+ "wtns-file",
+]
+
+[[package]]
+name = "wtns-file"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d3b856452298f68a5879e3901918bac5d753ca9fa4be8a983a37a3d25dabf0a"
+dependencies = [
+ "byteorder",
 ]
 
 [[package]]
