@@ -1,19 +1,17 @@
-use std::collections::HashMap;
-use compiler::circuit_design::template::{TemplateCode, TemplateCodeInfo};
+use compiler::circuit_design::template::{TemplateCode};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{
-    AddressType, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket,
-    LocationRule, OperatorType, StatusInput, StoreBucket, ValueType,
-};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use compiler::intermediate_representation::InstructionList;
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
 use ruint::uint;
+use std::collections::HashMap;
+use std::fmt::{Display};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
 use witness::graph::Node::Constant;
-use witness::graph::{Node, Operation, optimize};
+use witness::graph::{optimize, Node, Operation};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -97,18 +95,13 @@ fn value_from_instruction_usize(inst: &InstructionPointer) -> usize {
     0
 }
 
-fn int_from_value_instruction(inst: &InstructionPointer, nodes: &Vec<Node>) -> U256 {
-    match **inst {
-        Instruction::Value(ref value_bucket) => match value_bucket.parse_as {
-            ValueType::BigInt => match nodes[value_bucket.value] {
-                Constant(ref c) => c.clone(),
-                _ => panic!("not a constant"),
-            },
-            ValueType::U32 => U256::from(value_bucket.value),
+fn int_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> U256 {
+    match value_bucket.parse_as {
+        ValueType::BigInt => match nodes[value_bucket.value] {
+            Constant(ref c) => c.clone(),
+            _ => panic!("not a constant"),
         },
-        _ => {
-            panic!("not a value instruction: {}", inst.to_string())
-        }
+        ValueType::U32 => U256::from(value_bucket.value),
     }
 }
 
@@ -116,7 +109,7 @@ fn operator_argument_instruction(
     inst: &InstructionPointer,
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
-    vars: &mut Vec<U256>,
+    vars: &mut Vec<Option<Var>>,
     component_signal_start: usize,
     subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> usize {
@@ -140,8 +133,14 @@ fn operator_argument_instruction(
                         if template_header.is_some() {
                             panic!("not implemented: template_header expected to be None");
                         }
-                        let signal_idx = calc_const_expression(location, nodes, vars);
-                        let signal_idx = bigint_to_usize(&signal_idx);
+                        let signal_idx = calc_expression(
+                            location, nodes, vars, component_signal_start,
+                            signal_node_idx, subcomponents);
+                        let signal_idx = if let Var::Constant(c) = signal_idx {
+                            bigint_to_usize(&c)
+                        } else {
+                            panic!("signal index is not a constant")
+                        };
                         let signal_idx = component_signal_start + signal_idx;
                         let signal_node = signal_node_idx[signal_idx];
                         assert_ne!(signal_node, usize::MAX, "signal is not set yet");
@@ -157,16 +156,28 @@ fn operator_argument_instruction(
                 AddressType::SubcmpSignal {
                     ref cmp_address, ..
                 } => {
-                    let subcomponent_idx = calc_const_expression(cmp_address, nodes, vars);
-                    let subcomponent_idx = bigint_to_usize(&subcomponent_idx);
+                    let subcomponent_idx = calc_expression(
+                        cmp_address, nodes, vars, component_signal_start,
+                        signal_node_idx, subcomponents);
+                    let subcomponent_idx = if let Var::Constant(ref c) = subcomponent_idx {
+                        bigint_to_usize(c)
+                    } else {
+                        panic!("signal index is not a constant")
+                    };
 
                     match load_bucket.src {
                         LocationRule::Indexed {
                             ref location,
                             ref template_header,
                         } => {
-                            let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(&signal_idx);
+                            let signal_idx = calc_expression(
+                                location, nodes, vars, component_signal_start,
+                                signal_node_idx, subcomponents);
+                            let signal_idx = if let Var::Constant(ref c) = signal_idx {
+                                bigint_to_usize(c)
+                            } else {
+                                panic!("signal index is not a constant")
+                            };
                             let signal_offset = subcomponents[subcomponent_idx]
                                 .as_ref()
                                 .unwrap()
@@ -237,7 +248,7 @@ fn build_node_from_instruction(
     inst: &InstructionPointer,
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
-    vars: &mut Vec<U256>,
+    vars: &mut Vec<Option<Var>>,
     component_signal_start: usize,
     subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> Node {
@@ -302,7 +313,7 @@ fn process_instruction(
     inst: &InstructionPointer,
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
-    vars: &mut Vec<U256>,
+    vars: &mut Vec<Option<Var>>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     templates: &Vec<TemplateCode>,
     component_signal_start: usize,
@@ -315,22 +326,6 @@ fn process_instruction(
             panic!("not implemented");
         }
         Instruction::Store(ref store_bucket) => {
-            // println!(
-            //     "dest addr type: {:?}",
-            //     match store_bucket.dest_address_type {
-            //         AddressType::Variable => "Variable",
-            //         AddressType::Signal => "Signal",
-            //         AddressType::SubcmpSignal { .. } => "SubcmpSignal",
-            //     }
-            // );
-            // println!(
-            //     "location rule: {:?}",
-            //     match store_bucket.dest {
-            //         LocationRule::Indexed { .. } =>
-            //             format!("Indexed: {}", store_bucket.dest.to_string()),
-            //         LocationRule::Mapped { .. } => "Mapped".to_string(),
-            //     }
-            // );
             match store_bucket.dest_address_type {
                 AddressType::Signal => {
                     match &store_bucket.dest {
@@ -349,14 +344,21 @@ fn process_instruction(
                                 component_signal_start,
                                 subcomponents,
                             );
-                            let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(&signal_idx);
-                            println!(
-                                "Store signal at offset {} + {} = {}",
-                                component_signal_start,
-                                signal_idx,
-                                component_signal_start + signal_idx
-                            );
+                            let signal_idx = calc_expression(
+                                location, nodes, vars, component_signal_start,
+                                signal_node_idx, subcomponents);
+                            let signal_idx = if let Var::Constant(ref c) = signal_idx {
+                                bigint_to_usize(c)
+                            } else {
+                                panic!("signal index is not a constant")
+                            };
+
+                            // println!(
+                            //     "Store signal at offset {} + {} = {}",
+                            //     component_signal_start,
+                            //     signal_idx,
+                            //     component_signal_start + signal_idx
+                            // );
                             let signal_idx = component_signal_start + signal_idx;
                             assert_eq!(
                                 signal_node_idx[signal_idx],
@@ -384,8 +386,10 @@ fn process_instruction(
                                 panic!("not implemented: template_header expected to be None");
                             }
                             let lvar_idx = value_from_instruction_usize(location);
-                            vars[lvar_idx] = calc_const_expression(&store_bucket.src, nodes, vars);
-                            // vars[lvar_idx] = int_from_value_instruction(&store_bucket.src, nodes);
+                            vars[lvar_idx] = Some(calc_expression(
+                                &store_bucket.src, nodes, vars,
+                                component_signal_start, signal_node_idx,
+                                subcomponents));
                         }
                         _ => {
                             panic!(
@@ -407,18 +411,14 @@ fn process_instruction(
                     } else {
                         panic!("incorrect input information for subcomponent signal");
                     }
-                    let subcomponent_idx = calc_const_expression(cmp_address, nodes, vars);
-                    let subcomponent_idx = bigint_to_usize(&subcomponent_idx);
-                    print!(
-                        "cmp_address = {}, is_output: {}, status: {}",
-                        subcomponent_idx,
-                        is_output,
-                        match input_status {
-                            StatusInput::Last => "Last",
-                            StatusInput::NoLast => "NoLast",
-                            StatusInput::Unknown => "Unknown",
-                        }
-                    );
+                    let subcomponent_idx = calc_expression(
+                        cmp_address, nodes, vars, component_signal_start,
+                        signal_node_idx, subcomponents);
+                    let subcomponent_idx = if let Var::Constant(ref c) = subcomponent_idx {
+                        bigint_to_usize(&c)
+                    } else {
+                        panic!("subcomponent index is not a constant");
+                    };
 
                     let node_idx = operator_argument_instruction(
                         &store_bucket.src,
@@ -434,8 +434,14 @@ fn process_instruction(
                             ref location,
                             ref template_header,
                         } => {
-                            let signal_idx = calc_const_expression(location, nodes, vars);
-                            let signal_idx = bigint_to_usize(&signal_idx);
+                            let signal_idx = calc_expression(
+                                location, nodes, vars, component_signal_start,
+                                signal_node_idx, subcomponents);
+                            let signal_idx = if let Var::Constant(ref c) = signal_idx {
+                                bigint_to_usize(c)
+                            } else {
+                                panic!("signal index is not a constant");
+                            };
                             let signal_offset = subcomponents[subcomponent_idx]
                                 .as_ref()
                                 .unwrap()
@@ -505,8 +511,20 @@ fn process_instruction(
         Instruction::Call(_) => {
             panic!("not implemented");
         }
-        Instruction::Branch(_) => {
-            panic!("not implemented");
+        Instruction::Branch(ref branch_bucket) => {
+            if branch_bucket.if_branch.len() == 1 && branch_bucket.else_branch.len() == 1 {
+                let v = calc_expression(
+                    &branch_bucket.cond, nodes, vars, component_signal_start,
+                    signal_node_idx, subcomponents);
+                panic!("condition: {}", v.to_string());
+            }
+            // operator_argument_instruction()
+            // branch_bucket.if_branch
+            panic!(
+                "not implemented: {} {}",
+                branch_bucket.if_branch.len(),
+                branch_bucket.else_branch.len()
+            );
         }
         Instruction::Return(_) => {
             panic!("not implemented");
@@ -518,7 +536,10 @@ fn process_instruction(
             panic!("not implemented");
         }
         Instruction::Loop(ref loop_bucket) => {
-            while check_continue_condition(&loop_bucket.continue_condition, nodes, vars) {
+            while check_continue_condition(
+                &loop_bucket.continue_condition, nodes, vars,
+                component_signal_start, signal_node_idx, subcomponents) {
+
                 for i in &loop_bucket.body {
                     process_instruction(
                         i,
@@ -533,10 +554,15 @@ fn process_instruction(
             }
         }
         Instruction::CreateCmp(ref create_component_bucket) => {
-            let sub_cmp_id =
-                calc_const_expression(&create_component_bucket.sub_cmp_id, nodes, vars);
+            let sub_cmp_id = calc_expression(
+                &create_component_bucket.sub_cmp_id, nodes, vars,
+                component_signal_start, signal_node_idx, subcomponents);
 
-            let cmp_idx = bigint_to_usize(&sub_cmp_id);
+            let cmp_idx = if let Var::Constant(ref c) = sub_cmp_id {
+                bigint_to_usize(c)
+            } else {
+                panic!("subcomponent index is not a constant");
+            };
             assert!(
                 cmp_idx + create_component_bucket.number_of_cmp - 1 < subcomponents.len(),
                 "cmp_idx = {}, number_of_cmp = {}, subcomponents.len() = {}",
@@ -561,7 +587,9 @@ fn process_instruction(
             }
             println!(
                 "{}",
-                fmt_create_cmp_bucket(create_component_bucket, nodes, vars)
+                fmt_create_cmp_bucket(
+                    create_component_bucket, nodes, vars, component_signal_start,
+                    signal_node_idx, subcomponents)
             );
         }
     }
@@ -590,10 +618,20 @@ struct ComponentInstance {
 
 fn fmt_create_cmp_bucket(
     cmp_bucket: &CreateCmpBucket,
-    nodes: &Vec<Node>,
-    vars: &Vec<U256>,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> String {
-    let sub_cmp_id = calc_const_expression(&cmp_bucket.sub_cmp_id, nodes, vars);
+    let sub_cmp_id = calc_expression(
+        &cmp_bucket.sub_cmp_id, nodes, vars, component_signal_start,
+        signal_node_idx, subcomponents);
+
+    let sub_cmp_id = match sub_cmp_id {
+        Var::Constant(ref c) => format!("Constant {}", c.to_string()),
+        Var::Variable(idx) => format!("Variable {}", idx) };
+
     format!(
         r#"CreateCmpBucket: template_id: {}
                  cmp_unique_id: {}
@@ -648,45 +686,286 @@ fn variable_from_load_bucket(load_bucket: &LoadBucket, vars: &Vec<U256>) -> U256
     }
 }
 
-// This function should calculate node based only on constant or variable
-// values. Not based on signal values.
-fn calc_const_expression(inst: &InstructionPointer, nodes: &Vec<Node>, vars: &Vec<U256>) -> U256 {
-    match **inst {
-        Instruction::Value(ref value_bucket) => int_from_value_instruction(inst, nodes),
-        Instruction::Load(ref load_bucket) => variable_from_load_bucket(load_bucket, vars),
-        Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Lesser => {
-                assert_eq!(compute_bucket.stack.len(), 2);
-                let arg1 = calc_const_expression(&compute_bucket.stack[0], nodes, vars);
-                let arg2 = calc_const_expression(&compute_bucket.stack[1], nodes, vars);
-                if arg1 < arg2 {
-                    U256::from(1)
+#[derive(Clone)]
+enum Var {
+    Constant(U256),
+    Variable(usize),
+}
+
+impl ToString for Var {
+    fn to_string(&self) -> String {
+        match self {
+            Var::Constant(ref c) => { format!("Var::Constant({})", c.to_string()) }
+            Var::Variable(idx) => { format!("Var::Variable({})", idx) }
+        }
+    }
+}
+
+fn load(
+    load_bucket: &LoadBucket,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+) -> Var {
+    match load_bucket.address_type {
+        AddressType::Signal => match &load_bucket.src {
+            LocationRule::Indexed {
+                location,
+                template_header,
+            } => {
+                if template_header.is_some() {
+                    panic!("not implemented: template_header expected to be None");
+                }
+                let signal_idx = calc_expression(
+                    location,
+                    nodes,
+                    vars,
+                    component_signal_start,
+                    signal_node_idx,
+                    subcomponents,
+                );
+                let signal_idx = if let Var::Constant(c) = signal_idx {
+                    bigint_to_usize(&c)
                 } else {
-                    U256::ZERO
+                    panic!("signal index is not a constant")
+                };
+                let signal_idx = component_signal_start + signal_idx;
+                let signal_node = signal_node_idx[signal_idx];
+                assert_ne!(signal_node, usize::MAX, "signal is not set yet");
+                return Var::Variable(signal_node);
+            }
+            LocationRule::Mapped {
+                signal_code,
+                indexes,
+            } => {
+                todo!()
+            }
+        },
+        AddressType::SubcmpSignal {
+            ref cmp_address, ..
+        } => {
+            let subcomponent_idx = calc_expression(
+                cmp_address,
+                nodes,
+                vars,
+                component_signal_start,
+                signal_node_idx,
+                subcomponents,
+            );
+            let subcomponent_idx = if let Var::Constant(c) = subcomponent_idx {
+                bigint_to_usize(&c)
+            } else {
+                panic!("subcomponent index is not a constant");
+            };
+
+            match load_bucket.src {
+                LocationRule::Indexed {
+                    ref location,
+                    ref template_header,
+                } => {
+                    let signal_idx = calc_expression(
+                        location,
+                        nodes,
+                        vars,
+                        component_signal_start,
+                        signal_node_idx,
+                        subcomponents,
+                    );
+                    let signal_idx = if let Var::Constant(c) = signal_idx {
+                        bigint_to_usize(&c)
+                    } else {
+                        panic!("signal index is not a constant");
+                    };
+                    let signal_offset = subcomponents[subcomponent_idx]
+                        .as_ref()
+                        .unwrap()
+                        .signal_offset;
+
+                    let signal_idx = signal_offset + signal_idx;
+                    let signal_node = signal_node_idx[signal_idx];
+                    assert_ne!(
+                        signal_node,
+                        usize::MAX,
+                        "subcomponent signal is not set yet"
+                    );
+                    return Var::Variable(signal_node);
+                }
+                LocationRule::Mapped { .. } => {
+                    todo!()
                 }
             }
-            OperatorType::Add => {
-                assert_eq!(compute_bucket.stack.len(), 2);
-                let arg1 = calc_const_expression(&compute_bucket.stack[0], nodes, vars);
-                let arg2 = calc_const_expression(&compute_bucket.stack[1], nodes, vars);
-                arg1.add_mod(arg2, M)
+        }
+        AddressType::Variable => match load_bucket.src {
+            LocationRule::Indexed {
+                ref location,
+                ref template_header,
+            } => {
+                if template_header.is_some() {
+                    panic!("not implemented: template_header expected to be None");
+                }
+                let var_idx = calc_expression(
+                    location,
+                    nodes,
+                    vars,
+                    component_signal_start,
+                    signal_node_idx,
+                    subcomponents,
+                );
+                let var_idx = if let Var::Constant(c) = var_idx {
+                    bigint_to_usize(&c)
+                } else {
+                    panic!("signal index is not a constant");
+                };
+
+                return match vars[var_idx] {
+                    Some(ref v) => v.clone(),
+                    None => panic!("variable is not set yet"),
+                }
             }
-            OperatorType::AddAddress => {
-                assert_eq!(compute_bucket.stack.len(), 2);
-                let arg1 = calc_const_expression(&compute_bucket.stack[0], nodes, vars);
-                let arg2 = calc_const_expression(&compute_bucket.stack[1], nodes, vars);
-                arg1 + arg2
+            LocationRule::Mapped { .. } => {
+                todo!()
             }
-            OperatorType::MulAddress => {
-                assert_eq!(compute_bucket.stack.len(), 2);
-                let arg1 = calc_const_expression(&compute_bucket.stack[0], nodes, vars);
-                let arg2 = calc_const_expression(&compute_bucket.stack[1], nodes, vars);
-                arg1 * arg2
+        },
+    }
+}
+
+fn build_unary_op_var(
+    compute_bucket: &ComputeBucket,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+) -> Var {
+
+    assert_eq!(compute_bucket.stack.len(), 1);
+    let a = calc_expression(
+        &compute_bucket.stack[0],
+        nodes,
+        vars,
+        component_signal_start,
+        signal_node_idx,
+        subcomponents,
+    );
+
+    match &a {
+        Var::Constant(ref a) => {
+            Var::Constant(match compute_bucket.op {
+                OperatorType::ToAddress => a.clone(),
+                _ => {
+                    todo!(
+                        "unary operator not implemented: {}",
+                        compute_bucket.op.to_string()
+                    );
+                }
+            })
+        },
+        Var::Variable( .. ) => {
+            panic!("not implemented");
+        }
+    }
+}
+
+// Create a Var from operation on two arguments a anb b
+fn build_binary_op_var(
+    compute_bucket: &ComputeBucket,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+) -> Var {
+
+    assert_eq!(compute_bucket.stack.len(), 2);
+    let a = calc_expression(
+        &compute_bucket.stack[0],
+        nodes,
+        vars,
+        component_signal_start,
+        signal_node_idx,
+        subcomponents,
+    );
+    let b = calc_expression(
+        &compute_bucket.stack[1],
+        nodes,
+        vars,
+        component_signal_start,
+        signal_node_idx,
+        subcomponents,
+    );
+
+    let mut node_idx = |v: &Var| match v {
+        Var::Constant(ref c) => {
+            nodes.push(Node::Constant(c.clone()));
+            nodes.len() - 1
+        }
+        Var::Variable(idx) => { idx.clone() }
+    };
+
+    match (&a, &b) {
+        (Var::Constant(ref a), Var::Constant(ref b)) => {
+            Var::Constant(match compute_bucket.op {
+                OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
+                OperatorType::Add => a.add_mod(b.clone(), M),
+                OperatorType::NotEq => U256::from(a != b),
+                OperatorType::AddAddress => a + b,
+                OperatorType::MulAddress => a * b,
+                _ => {
+                    todo!(
+                        "operator not implemented: {}",
+                        compute_bucket.op.to_string()
+                    );
+                }
+            })
+        },
+        _ => {
+            let node = Node::Op(match compute_bucket.op {
+                OperatorType::Lesser => Operation::Lt,
+                OperatorType::Add => Operation::Add,
+                OperatorType::NotEq => Operation::Neq,
+                _ => {
+                    todo!(
+                        "operator not implemented: {}",
+                        compute_bucket.op.to_string()
+                    );
+                }
+            }, node_idx(&a), node_idx(&b));
+            nodes.push(node);
+            Var::Variable(nodes.len() - 1)
+        }
+    }
+}
+
+// This function should calculate node based only on constant or variable
+// values. Not based on signal values.
+fn calc_expression(
+    inst: &InstructionPointer,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+) -> Var {
+    match **inst {
+        Instruction::Value(ref value_bucket) => {
+            Var::Constant(int_from_value_instruction(value_bucket, nodes))
+        }
+        Instruction::Load(ref load_bucket) => load(
+            load_bucket,
+            nodes,
+            vars,
+            component_signal_start,
+            signal_node_idx,
+            subcomponents,
+        ),
+        Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
+            OperatorType::Lesser | OperatorType::Add | OperatorType::NotEq | OperatorType::AddAddress | OperatorType::MulAddress => {
+                build_binary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
             OperatorType::ToAddress => {
-                assert_eq!(compute_bucket.stack.len(), 1);
-                let arg1 = calc_const_expression(&compute_bucket.stack[0], nodes, vars);
-                arg1
+                build_unary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
             _ => {
                 todo!(
@@ -697,7 +976,7 @@ fn calc_const_expression(inst: &InstructionPointer, nodes: &Vec<Node>, vars: &Ve
         },
         _ => {
             panic!(
-                "unable to evaluate constant instruction: {}",
+                "instruction evaluation is not supported: {}",
                 inst.to_string()
             );
         }
@@ -706,11 +985,19 @@ fn calc_const_expression(inst: &InstructionPointer, nodes: &Vec<Node>, vars: &Ve
 
 fn check_continue_condition(
     inst: &InstructionPointer,
-    nodes: &Vec<Node>,
-    vars: &Vec<U256>,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> bool {
-    let val = calc_const_expression(inst, nodes, vars);
-    return val != U256::ZERO;
+    let val = calc_expression(inst, nodes, vars, component_signal_start, signal_node_idx, subcomponents);
+    match val {
+        Var::Constant(c) => c != U256::ZERO,
+        _ => {
+            panic!("continue condition is not a constant");
+        }
+    }
 }
 
 fn print_instruction(inst: &InstructionPointer) {
@@ -824,7 +1111,7 @@ fn run_template(
 
     // print_instruction_list(&tmpl.body);
 
-    let mut vars = vec![U256::ZERO; tmpl.var_stack_depth];
+    let mut vars: Vec<Option<Var>> = vec![Option::None; tmpl.var_stack_depth];
     let mut components: Vec<Option<ComponentInstance>> = vec![];
     for i in 0..tmpl.number_of_components {
         components.push(None);
@@ -947,7 +1234,8 @@ fn main() {
         assert_ne!(i.clone(), usize::MAX, "signal #{} is not set", idx);
     }
 
-    let mut signals = witness_list.iter()
+    let mut signals = witness_list
+        .iter()
         .map(|&i| signal_node_idx[i])
         .collect::<Vec<_>>();
 
@@ -955,7 +1243,11 @@ fn main() {
 
     optimize(&mut nodes, &mut signals);
 
-    println!("number of nodes after optimize {}, signals {}", nodes.len(), signals.len());
+    println!(
+        "number of nodes after optimize {}, signals {}",
+        nodes.len(),
+        signals.len()
+    );
 
     // let mut input_signals: HashMap<String, (usize, usize)> = HashMap::new();
     // for (name, offset, len) in circuit.c_producer.get_main_input_list() {
@@ -966,4 +1258,14 @@ fn main() {
     std::fs::write("graph_v2.bin", bytes).unwrap();
 
     println!("YAHOO")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_calc_const_expression() {
+        println!("OK");
+    }
 }

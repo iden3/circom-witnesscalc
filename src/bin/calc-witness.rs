@@ -78,6 +78,8 @@ fn main() {
     println!("inputs: {:?}", inputs);
 
     let witness = graph::evaluate(&nodes, inputs_buffer.as_slice(), &signals);
+    // println!("witness: {:?}", witness);
+
     let vec_witness: Vec<FieldElement<32>> = witness.iter().map(|a| conv(a)).collect();
     let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, conv(&M));
     wtns_f.version = 2;
