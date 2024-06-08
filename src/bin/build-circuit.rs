@@ -7,6 +7,7 @@ use program_structure::error_definition::Report;
 use ruint::aliases::U256;
 use ruint::uint;
 use std::collections::HashMap;
+use std::env;
 use std::fmt::{Display};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
@@ -1133,14 +1134,44 @@ fn run_template(
     // TODO: assert all components run
 }
 
+fn parse_args() -> (String, Vec<PathBuf>) {
+    let args: Vec<String> = env::args().collect();
+    let mut i = 1;
+    let mut circuit_file: Option<String> = None;
+    let mut link_libraries: Vec<PathBuf> = Vec::new();
+    while i < args.len() {
+        if args[i] == "-l" {
+            i += 1;
+            if i >= args.len() {
+                panic!("missing argument for -l");
+            }
+            link_libraries.push(args[i].clone().into());
+        } else if args[i].starts_with("-l") {
+            link_libraries.push(args[i][2..].to_string().into())
+        } else if args[i].starts_with("-") {
+            panic!("unknown argument: {}", args[i]);
+        } else {
+            circuit_file = Some(args[i].clone());
+        }
+        i += 1;
+    };
+
+    match circuit_file {
+        Some(circuit_file) => (circuit_file, link_libraries),
+        None => panic!("missing circuit file"),
+    }
+}
+
 fn main() {
+    let (circuit_file, link_libraries) = parse_args();
+
     let version = "2.1.9";
 
-    let main_file = "/Users/alek/src/simple-circuit/circuit3.circom";
+    // let main_file = "/Users/alek/src/simple-circuit/circuit3.circom";
     // let main_file = "/Users/alek/src/circuits/circuits/authV2.circom";
-    let link_libraries: Vec<PathBuf> =
-        vec!["/Users/alek/src/circuits/node_modules/circomlib/circuits".into()];
-    let parser_result = parser::run_parser(main_file.to_string(), version, link_libraries);
+    // let link_libraries: Vec<PathBuf> =
+    //     vec!["/Users/alek/src/circuits/node_modules/circomlib/circuits".into()];
+    let parser_result = parser::run_parser(circuit_file, version, link_libraries);
     let mut program_archive = match parser_result {
         Err((file_library, report_collection)) => {
             Report::print_reports(&report_collection, &file_library);

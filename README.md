@@ -45,3 +45,9 @@ As a nice side effect of the graph optimizations, the binary size is also reduce
 
 There are still quite a few missing operations that need to be implemented. The list of supported and unsupported operations can be found here. Support for the missing operations is very straighfoward and will be added in the future.
 https://github.com/philsippl/circom-witness-rs/blob/e889cedde49a8929812b825aede55d9668118302/src/generate.rs#L61-L89
+
+## Build witness from intermediate representation
+
+```shell
+cargo run --package witness --bin build-circuit <path to circuit.circom> [-l <path to circom libs>]
+```
