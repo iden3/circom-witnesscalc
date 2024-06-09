@@ -622,7 +622,7 @@ fn process_instruction(
                                 usize::MAX,
                                 "signal already set"
                             );
-                            signal_node_idx[if_signal_idx] = node_idx;
+                            signal_node_idx[if_signal_idx] = nodes.len() - 1;
                         }
                         _ => {
                             panic!(
@@ -1204,7 +1204,7 @@ fn init_input_signals(
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
     input_file: Option<String>,
-) -> HashMap<String, (usize, usize)> {
+) -> (HashMap<String, (usize, usize)>, Vec<U256>) {
     let input_list = circuit.c_producer.get_main_input_list();
     let mut signal_values: Vec<U256> = Vec::new();
     signal_values.push(U256::from(1));
@@ -1214,7 +1214,7 @@ fn init_input_signals(
 
     let inputs: Option<HashMap<String, Vec<U256>>> = match input_file {
         Some(file) => {
-            let inputs_data = std::fs::read(file).expect("Failed to read input file");
+            let inputs_data = fs::read(file).expect("Failed to read input file");
             Some(serde_json::from_slice::<HashMap<String, Vec<U256>>>(inputs_data.as_slice()).unwrap())
         }
         None => {
@@ -1254,7 +1254,7 @@ fn init_input_signals(
         }
     }
 
-    return inputs_info;
+    return (inputs_info, signal_values);
 }
 
 fn run_template(
@@ -1302,6 +1302,7 @@ struct Args {
     inputs_file: Option<String>,
     graph_file: String,
     link_libraries: Vec<PathBuf>,
+    print_unoptimized: bool,
 }
 
 fn parse_args() -> Args {
@@ -1311,10 +1312,11 @@ fn parse_args() -> Args {
     let mut graph_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
     let mut inputs_file: Option<String> = None;
+    let mut print_unoptimized = false;
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>]", args[0]);
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized]", args[0]);
         std::process::exit(1);
     };
 
@@ -1343,6 +1345,8 @@ fn parse_args() -> Args {
             } else {
                 usage("multiple inputs files");
             }
+        } else if args[i] == "-print-unoptimized" {
+            print_unoptimized = true;
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -1361,6 +1365,7 @@ fn parse_args() -> Args {
         inputs_file,
         graph_file: graph_file.unwrap_or_else(|| {usage("missing graph file")}),
         link_libraries,
+        print_unoptimized,
     }
 }
 
@@ -1448,7 +1453,7 @@ fn main() {
 
     let mut nodes: Vec<Node> = Vec::new();
     nodes.extend(get_constants(&circuit));
-    let input_signals = init_input_signals(
+    let (input_signals, input_signal_values) = init_input_signals(
         &circuit, &mut nodes, &mut signal_node_idx, args.inputs_file);
 
     // assert that template id is equal to index in templates list
@@ -1474,6 +1479,11 @@ fn main() {
         .map(|&i| signal_node_idx[i])
         .collect::<Vec<_>>();
 
+    if args.print_unoptimized {
+        println!("Unoptimized graph:");
+        evaluate_unoptimized(&nodes, &input_signal_values, &signal_node_idx, &witness_list);
+    }
+
     println!("number of nodes {}, signals {}", nodes.len(), signals.len());
 
     optimize(&mut nodes, &mut signals);
@@ -1490,10 +1500,49 @@ fn main() {
     // }
 
     let bytes = postcard::to_stdvec(&(&nodes, &signals, &input_signals)).unwrap();
-    // "graph_v2.bin"
-    std::fs::write(&args.graph_file, bytes).unwrap();
+    fs::write(&args.graph_file, bytes).unwrap();
 
     println!("circuit graph saved to file: {}", &args.graph_file)
+}
+
+fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<usize>, witness_signals: &[usize]) {
+    let mut node_idx_to_signal: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (signal_idx, &node_idx) in signal_node_idx.iter().enumerate() {
+        node_idx_to_signal.entry(node_idx).and_modify(|v| v.push(signal_idx)).or_insert(vec![signal_idx]);
+    }
+
+    let mut signal_to_witness: HashMap<usize, Vec<usize>> = HashMap::new();
+    for (witness_idx, &signal_idx) in witness_signals.iter().enumerate() {
+        println!("witness {} -> {}", witness_idx, signal_idx);
+        signal_to_witness.entry(signal_idx).and_modify(|v| v.push(witness_idx)).or_insert(vec![witness_idx]);
+    }
+
+    let mut values = Vec::with_capacity(nodes.len());
+
+    for (node_idx, &node) in nodes.iter().enumerate() {
+        let value = match node {
+            Node::Constant(c) => c,
+            Node::MontConstant(c) => {panic!("no montgomery constant expected in unoptimized graph")},
+            Node::Input(i) => inputs[i],
+            Node::Op(op, a, b) => op.eval(values[a], values[b]),
+            Node::UnoOp(op, a) => op.eval_uno(values[a]),
+            Node::TresOp(op, a, b, c) => op.eval_tres(values[a], values[b], values[c]),
+        };
+        values.push(value);
+
+        let empty_vec: Vec<usize> = Vec::new();
+        let signals_for_node: &Vec<usize>= node_idx_to_signal.get(&node_idx).unwrap_or(&empty_vec);
+
+        let input_idx = signals_for_node.iter().map(|&i| i.to_string()).collect::<Vec<String>>().join(", ");
+
+        let mut output_signals: Vec<usize> = Vec::new();
+        for &signal_idx in signals_for_node {
+            output_signals.extend(signal_to_witness.get(&signal_idx).unwrap_or(&empty_vec));
+        }
+        let output_signals = output_signals.iter().map(|&i| i.to_string()).collect::<Vec<String>>().join(", ");
+
+        println!("[{:4}] {:>77} ({:>4}) ({:>4}) {:?}", node_idx, value.to_string(), input_idx, output_signals, node);
+    }
 }
 
 #[cfg(test)]

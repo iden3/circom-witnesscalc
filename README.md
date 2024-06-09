@@ -51,8 +51,14 @@ https://github.com/philsippl/circom-witness-rs/blob/e889cedde49a8929812b825aede5
 To create a circuit graph file from a Circom 2 program, run the following command:
 
 ```shell
-cargo run --package witness --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]*
+cargo run --package witness --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
 ```
+
+Optional flags:
+
+* `-l <path_to_circom_libs/>` - Path to the circomlib directory. This flag can be used multiple times.
+* `-i <inputs_file.json>` - Path to the inputs file. If provided, the inputs will be used to generate the witness. Otherwise, inputs will be set to 0.
+* `-print-unoptimized` - Evaluate the graph with provided or default inputs and print it to stdout (useful for debugging).
 
 ## Calculate witness from circuit graph created on previous step
 
@@ -71,8 +77,9 @@ To run circuits tests, first get the iden3/circomlib repository
 ```shell
 git clone git@github.com:iden3/circomlib.git
 ```
-
-Also, you need to have the following commands installed: `circom`, `snarkjs` and `curl`.
+circom snarkjs curl cargo node cmp
+Also, you need to have the following commands installed: `circom`, `snarkjs`,
+`curl`, `cargo`, `node` and `cmp`.
 
 Now run the `test_circuits.sh` script.
 
