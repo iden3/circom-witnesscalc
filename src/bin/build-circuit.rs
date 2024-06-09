@@ -1,7 +1,6 @@
 use compiler::circuit_design::template::{TemplateCode};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, ValueBucket, ValueType};
-use compiler::intermediate_representation::InstructionList;
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
@@ -55,69 +54,6 @@ fn try_signal_store<'a>(
         LocationRule::Mapped { .. } => {
             todo!()
         }
-    }
-}
-
-fn print_instruction_list(il: &InstructionList) {
-    for i in il.iter() {
-        print_instruction(i);
-    }
-}
-
-fn print_location_rule(lr: &LocationRule) {
-    match lr {
-        LocationRule::Indexed {
-            location,
-            template_header,
-        } => {
-            let s: String = template_header
-                .as_ref()
-                .map_or("-".to_string(), |v| v.clone());
-            println!("[begin] Location Indexed: {}", s);
-            print_instruction(&location);
-            println!("[end] Location Indexed");
-        }
-        LocationRule::Mapped {
-            signal_code,
-            indexes,
-        } => {
-            println!("[begin] Location Mapped: {}", signal_code);
-            print_instruction_list(&indexes);
-            println!("[end] Location Mapped");
-        }
-    }
-}
-
-fn fmt_address_type() {}
-
-fn fmt_operator_type(op: &OperatorType) -> &str {
-    match op {
-        OperatorType::Add => "Add",
-        OperatorType::Mul => "Mul",
-        OperatorType::Div => "Div",
-        OperatorType::Sub => "Sub",
-        OperatorType::Pow => "Pow",
-        OperatorType::IntDiv => "IntDiv",
-        OperatorType::Mod => "Mod",
-        OperatorType::ShiftL => "ShiftL",
-        OperatorType::ShiftR => "ShiftR",
-        OperatorType::LesserEq => "LesserEq",
-        OperatorType::GreaterEq => "GreaterEq",
-        OperatorType::Lesser => "Lesser",
-        OperatorType::Greater => "Greater",
-        OperatorType::Eq(_) => "Eq",
-        OperatorType::NotEq => "NotEq",
-        OperatorType::BoolOr => "BoolOr",
-        OperatorType::BoolAnd => "BoolAnd",
-        OperatorType::BitOr => "BitOr",
-        OperatorType::BitAnd => "BitAnd",
-        OperatorType::BitXor => "BitXor",
-        OperatorType::PrefixSub => "PrefixSub",
-        OperatorType::BoolNot => "BoolNot",
-        OperatorType::Complement => "Complement",
-        OperatorType::ToAddress => "ToAddress",
-        OperatorType::MulAddress => "MulAddress",
-        OperatorType::AddAddress => "AddAddress",
     }
 }
 
@@ -771,30 +707,6 @@ fn fmt_create_cmp_bucket(
     )
 }
 
-fn variable_from_load_bucket(load_bucket: &LoadBucket, vars: &Vec<U256>) -> U256 {
-    match load_bucket.address_type {
-        AddressType::Variable => {}
-        _ => {
-            panic!("not a variable address type");
-        }
-    }
-    match load_bucket.src {
-        LocationRule::Indexed {
-            ref location,
-            ref template_header,
-        } => {
-            if template_header.is_some() {
-                panic!("not implemented: template_header expected to be None");
-            }
-            let idx = value_from_instruction_usize(location);
-            return vars[idx];
-        }
-        LocationRule::Mapped { .. } => {
-            todo!()
-        }
-    }
-}
-
 #[derive(Clone)]
 enum Var {
     Constant(U256),
@@ -1130,67 +1042,6 @@ fn check_continue_condition(
     }
 }
 
-fn print_instruction(inst: &InstructionPointer) {
-    // println!("statement: {}", inst.to_string());
-
-    match **inst {
-        Instruction::Value(ref value_bucket) => {
-            println!(
-                "Value {}/{}/{}",
-                value_bucket.value,
-                value_bucket.op_aux_no,
-                value_bucket.parse_as.to_string()
-            );
-        }
-        Instruction::Load(ref load_bucket) => {
-            println!("[begin] Load");
-            print_location_rule(&load_bucket.src);
-            println!("[end] Load");
-        }
-        Instruction::Store(ref store_bucket) => {
-            println!("[begin] Store");
-            println!("SRC:");
-            print_instruction(&store_bucket.src);
-            println!("DST:");
-            print_location_rule(&store_bucket.dest);
-            println!("[end] Store");
-        }
-        Instruction::Compute(ref compute_bucket) => {
-            println!("[begin] Compute {}", fmt_operator_type(&compute_bucket.op));
-            for arg in &compute_bucket.stack {
-                print_instruction(arg);
-            }
-            println!("[end] Compute {}", fmt_operator_type(&compute_bucket.op));
-        }
-        Instruction::Call(_) => {
-            println!("Call");
-        }
-        Instruction::Branch(_) => {
-            println!("Branch");
-        }
-        Instruction::Return(_) => {
-            println!("Return");
-        }
-        Instruction::Assert(_) => {
-            println!("assert");
-        }
-        Instruction::Log(_) => {
-            println!("Log");
-        }
-        Instruction::Loop(_) => {
-            println!("Log");
-        }
-        Instruction::CreateCmp(ref create_cmp_bucket) => {
-            println!(
-                "CreateCmp: signal_offset: {}, signal_offset_jump: {}, sub_cmp_id: {}",
-                create_cmp_bucket.signal_offset,
-                create_cmp_bucket.signal_offset_jump,
-                create_cmp_bucket.sub_cmp_id.to_string()
-            );
-        }
-    }
-}
-
 fn get_constants(circuit: &Circuit) -> Vec<Node> {
     let mut constants: Vec<Node> = Vec::new();
     for c in &circuit.c_producer.field_tracking {
@@ -1272,8 +1123,6 @@ fn run_template(
         tmpl.name,
         tmpl.body.len()
     );
-
-    // print_instruction_list(&tmpl.body);
 
     let mut vars: Vec<Option<Var>> = vec![Option::None; tmpl.var_stack_depth];
     let mut components: Vec<Option<ComponentInstance>> = vec![];
@@ -1522,7 +1371,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
     for (node_idx, &node) in nodes.iter().enumerate() {
         let value = match node {
             Node::Constant(c) => c,
-            Node::MontConstant(c) => {panic!("no montgomery constant expected in unoptimized graph")},
+            Node::MontConstant(_) => {panic!("no montgomery constant expected in unoptimized graph")},
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),
             Node::UnoOp(op, a) => op.eval_uno(values[a]),
