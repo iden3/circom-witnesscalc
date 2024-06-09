@@ -51,56 +51,7 @@ pub enum Operation {
     Band,
     Div,
     Idiv,
-    TernCond,
 }
-
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
-pub enum UnoOperation {
-    Neg,
-}
-
-impl UnoOperation {
-    pub fn eval(&self, a: U256) -> U256 {
-        match self {
-            UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
-        }
-    }
-
-    pub fn eval_fr_uno(&self, a: Fr) -> Fr {
-        match self {
-            UnoOperation::Neg => if a.is_zero() { Fr::zero() } else {
-                let mut x = Fr::MODULUS;
-                x.sub_with_borrow(&a.into_bigint());
-                Fr::from_bigint(x).unwrap()
-            },
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Node {
-    Input(usize),
-    Constant(U256),
-    #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
-    MontConstant(Fr),
-    UnoOp(UnoOperation, usize),
-    Op(Operation, usize, usize),
-    TresOp(Operation, usize, usize, usize),
-}
-
-// impl ToString for Node {
-//     fn to_string(&self) -> String {
-//         use Node::*;
-//         match self {
-//             Input(i) => format!("input({})", i),
-//             Constant(c) => format!("{}", c),
-//             MontConstant(c) => format!("{}", c),
-//             UnoOp(op, a) => format!("{:?}({})", op, a),
-//             Op(op, a, b) => format!("{:?}({}, {})", op, a, b),
-//             TresOp(op, a, b, c) => format!("{:?}({}, {}, {})", op, a, b, c),
-//         }
-//     }
-// }
 
 impl Operation {
     pub fn eval(&self, a: U256, b: U256) -> U256 {
@@ -131,14 +82,8 @@ impl Operation {
                 }
             },
             Idiv => a / b,
+            // TODO implement other operators
             _ => unimplemented!("operator {:?} not implemented", self),
-        }
-    }
-
-    pub fn eval_tres(&self, a: U256, b: U256, c: U256) -> U256 {
-        match self {
-            Operation::TernCond => if a == U256::ZERO { c } else { b },
-            _ => unimplemented!("operator {:?} not implemented for TRES operation", self),
         }
     }
 
@@ -160,17 +105,65 @@ impl Operation {
                     _ => Fr::one(),
                 }
             },
+            // TODO implement other operators
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
         }
     }
+}
 
-    pub fn eval_fr_tres(&self, a: Fr, b: Fr, c: Fr) -> Fr {
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum UnoOperation {
+    Neg,
+}
+
+impl UnoOperation {
+    pub fn eval(&self, a: U256) -> U256 {
         match self {
-            Operation::TernCond => if a.is_zero() { c } else { b },
-            _ => unimplemented!("operator {:?} not implemented for TRES operation", self),
+            UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
+        }
+    }
+
+    pub fn eval_fr(&self, a: Fr) -> Fr {
+        match self {
+            UnoOperation::Neg => if a.is_zero() { Fr::zero() } else {
+                let mut x = Fr::MODULUS;
+                x.sub_with_borrow(&a.into_bigint());
+                Fr::from_bigint(x).unwrap()
+            },
         }
     }
 }
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum TresOperation {
+    TernCond,
+}
+
+impl TresOperation {
+    pub fn eval(&self, a: U256, b: U256, c: U256) -> U256 {
+        match self {
+            TresOperation::TernCond => if a == U256::ZERO { c } else { b },
+        }
+    }
+
+    pub fn eval_fr(&self, a: Fr, b: Fr, c: Fr) -> Fr {
+        match self {
+            TresOperation::TernCond => if a.is_zero() { c } else { b },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Node {
+    Input(usize),
+    Constant(U256),
+    #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
+    MontConstant(Fr),
+    UnoOp(UnoOperation, usize),
+    Op(Operation, usize, usize),
+    TresOp(TresOperation, usize, usize, usize),
+}
+
 
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));
@@ -220,8 +213,8 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
             Node::MontConstant(c) => c,
             Node::Input(i) => Fr::new(inputs[i].into()),
             Node::Op(op, a, b) => op.eval_fr(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval_fr_uno(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval_fr_tres(values[a], values[b], values[c]),
+            Node::UnoOp(op, a) => op.eval_fr(values[a]),
+            Node::TresOp(op, a, b, c) => op.eval_fr(values[a], values[b], values[c]),
         };
         values.push(value);
     }
@@ -314,7 +307,7 @@ pub fn propagate(nodes: &mut [Node]) {
             }
         } else if let Node::TresOp(op, a, b, c) = nodes[i] {
             if let (Node::Constant(va), Node::Constant(vb), Node::Constant(vc)) = (nodes[a], nodes[b], nodes[c]) {
-                nodes[i] = Node::Constant(op.eval_tres(va, vb, vc));
+                nodes[i] = Node::Constant(op.eval(va, vb, vc));
                 constants += 1;
             }
         }

@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::{env, fs};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
-use witness::graph::{optimize, Node, Operation, UnoOperation};
+use witness::graph::{optimize, Node, Operation, UnoOperation, TresOperation};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -511,7 +511,7 @@ fn process_instruction(
                 }
             };
         }
-        Instruction::Compute(ref compute_bucket) => {
+        Instruction::Compute(_) => {
             panic!("not implemented");
         }
         Instruction::Call(_) => {
@@ -522,7 +522,7 @@ fn process_instruction(
                 &branch_bucket.cond, nodes, vars, component_signal_start,
                 signal_node_idx, subcomponents);
             match cond {
-                Var::Constant(c) => {
+                Var::Constant(_c) => {
                     todo!("branch is implemented only for ternary operator")
                 }
                 Var::Variable(node_idx) => {
@@ -551,7 +551,7 @@ fn process_instruction(
                                 else_src, nodes, signal_node_idx, vars,
                                 component_signal_start, subcomponents);
 
-                            let node = Node::TresOp(Operation::TernCond, node_idx, node_idx_if, node_idx_else);
+                            let node = Node::TresOp(TresOperation::TernCond, node_idx, node_idx_if, node_idx_else);
                             nodes.push(node);
                             assert_eq!(
                                 signal_node_idx[if_signal_idx],
@@ -642,7 +642,7 @@ fn process_instruction(
 
 fn bigint_to_usize(value: &U256) -> usize {
     // Convert U256 to usize
-    let mut bytes = value.to_le_bytes::<32>().to_vec(); // Convert to little-endian bytes
+    let bytes = value.to_le_bytes::<32>().to_vec(); // Convert to little-endian bytes
     for i in std::mem::size_of::<usize>()..bytes.len() {
         if bytes[i] != 0 {
             panic!("Value is too large to fit into usize");
@@ -757,10 +757,7 @@ fn load(
                 assert_ne!(signal_node, usize::MAX, "signal is not set yet");
                 return Var::Variable(signal_node);
             }
-            LocationRule::Mapped {
-                signal_code,
-                indexes,
-            } => {
+            LocationRule::Mapped { .. } => {
                 todo!()
             }
         },
@@ -1126,7 +1123,7 @@ fn run_template(
 
     let mut vars: Vec<Option<Var>> = vec![Option::None; tmpl.var_stack_depth];
     let mut components: Vec<Option<ComponentInstance>> = vec![];
-    for i in 0..tmpl.number_of_components {
+    for _ in 0..tmpl.number_of_components {
         components.push(None);
     }
 
@@ -1375,7 +1372,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),
             Node::UnoOp(op, a) => op.eval(values[a]),
-            Node::TresOp(op, a, b, c) => op.eval_tres(values[a], values[b], values[c]),
+            Node::TresOp(op, a, b, c) => op.eval(values[a], values[b], values[c]),
         };
         values.push(value);
 

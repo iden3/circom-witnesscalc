@@ -1,4 +1,4 @@
-use crate::graph::{Node, Operation, UnoOperation};
+use crate::graph::{Node, Operation, TresOperation, UnoOperation};
 use ruint::{aliases::U256, uint};
 use std::{ptr, sync::Mutex};
 use std::collections::HashSet;
@@ -119,7 +119,7 @@ fn unoop(op: UnoOperation, to: *mut FrElement, a: *const FrElement) {
     constant.push(ca);
 }
 
-fn tresop(op: Operation, to: *mut FrElement, a: *const FrElement, b: *const FrElement, c: *const FrElement) {
+fn tresop(op: TresOperation, to: *mut FrElement, a: *const FrElement, b: *const FrElement, c: *const FrElement) {
     let mut nodes = NODES.lock().unwrap();
     let mut values = VALUES.lock().unwrap();
     let mut constant = CONSTANT.lock().unwrap();
@@ -134,7 +134,7 @@ fn tresop(op: Operation, to: *mut FrElement, a: *const FrElement, b: *const FrEl
     *to = nodes.len() - 1;
 
     let (va, vb, vc) = (values[a], values[b], values[c]);
-    values.push(op.eval_tres(va, vb, vc));
+    values.push(op.eval(va, vb, vc));
 
     let (ca, cb) = (constant[a], constant[b]);
     constant.push(ca && cb);
@@ -348,5 +348,5 @@ pub fn trace_signal(i: usize) {
 #[allow(dead_code)]
 pub unsafe fn tern_cond(to: *mut FrElement, a: *const FrElement,
                     b: *const FrElement, c: *const FrElement) {
-    tresop(Operation::TernCond, to, a, b, c);
+    tresop(TresOperation::TernCond, to, a, b, c);
 }
