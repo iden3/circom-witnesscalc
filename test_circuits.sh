@@ -63,6 +63,8 @@ for circuit_path in "${script_dir}"/test_circuits/*.circom; do
 
   circom -l "${circomlib_path}" --r1cs --wasm "$circuit_path"
   node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
+  snarkjs wej "${witness_path}" "${witness_path}.json"
+  snarkjs wej "${witness_path}2" "${witness_path}2.json"
 
   snarkjs wtns check "${circuit_name}".r1cs "${witness_path}"
   snarkjs wtns check "${circuit_name}".r1cs "${witness_path}2"
