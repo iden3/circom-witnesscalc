@@ -11,11 +11,53 @@ use std::env;
 use std::fmt::{Display};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
-use witness::graph::Node::Constant;
 use witness::graph::{optimize, Node, Operation};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
+
+// if instruction pointer is a store to the signal, return the signal index
+// and the src instruction to store to the signal
+fn try_signal_store<'a>(
+    inst: &'a InstructionPointer,
+    nodes: &mut Vec<Node>,
+    vars: &Vec<Option<Var>>,
+    component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+) -> Option<(usize, &'a InstructionPointer)> {
+    let store_bucket = match **inst {
+        Instruction::Store(ref store_bucket) => store_bucket,
+        _ => return None,
+    };
+    if let AddressType::Signal = store_bucket.dest_address_type {
+
+    } else { return None; };
+    match &store_bucket.dest {
+        LocationRule::Indexed {
+            location,
+            template_header,
+        } => {
+            if template_header.is_some() {
+                panic!("not implemented: template_header expected to be None");
+            }
+            let signal_idx = calc_expression(
+                location, nodes, vars, component_signal_start,
+                signal_node_idx, subcomponents);
+            let signal_idx = if let Var::Constant(ref c) = signal_idx {
+                bigint_to_usize(c)
+            } else {
+                panic!("signal index is not a constant")
+            };
+
+            let signal_idx = component_signal_start + signal_idx;
+            return Some((signal_idx, &store_bucket.src));
+        }
+        LocationRule::Mapped { .. } => {
+            todo!()
+        }
+    }
+}
 
 fn print_instruction_list(il: &InstructionList) {
     for i in il.iter() {
@@ -99,7 +141,7 @@ fn value_from_instruction_usize(inst: &InstructionPointer) -> usize {
 fn int_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> U256 {
     match value_bucket.parse_as {
         ValueType::BigInt => match nodes[value_bucket.value] {
-            Constant(ref c) => c.clone(),
+            Node::Constant(ref c) => c.clone(),
             _ => panic!("not a constant"),
         },
         ValueType::U32 => U256::from(value_bucket.value),
@@ -225,7 +267,7 @@ fn operator_argument_instruction(
         Instruction::Value(ref value_bucket) => {
             match value_bucket.parse_as {
                 ValueType::BigInt => match nodes[value_bucket.value] {
-                    Constant(..) => {
+                    Node::Constant(..) => {
                         return value_bucket.value;
                     }
                     _ => {
@@ -295,6 +337,38 @@ fn build_node_from_instruction(
                         subcomponents,
                     );
                     return Node::Op(Operation::Mul, arg1, arg2);
+                }
+                OperatorType::Div => {
+                    assert_eq!(compute_bucket.stack.len(), 2);
+                    let arg1 = operator_argument_instruction(
+                        &compute_bucket.stack[0],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    let arg2 = operator_argument_instruction(
+                        &compute_bucket.stack[1],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    return Node::Op(Operation::Div, arg1, arg2);
+                }
+                OperatorType::PrefixSub => {
+                    assert_eq!(compute_bucket.stack.len(), 1);
+                    let arg1 = operator_argument_instruction(
+                        &compute_bucket.stack[0],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    return Node::UnoOp(Operation::Neg, arg1);
                 }
                 _ => {
                     panic!("not implemented: this operator is not supported to be converted to Node: {}", inst.to_string());
@@ -513,25 +587,64 @@ fn process_instruction(
             panic!("not implemented");
         }
         Instruction::Branch(ref branch_bucket) => {
-            if branch_bucket.if_branch.len() == 1 && branch_bucket.else_branch.len() == 1 {
-                let v = calc_expression(
-                    &branch_bucket.cond, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents);
-                panic!("condition: {}", v.to_string());
+            let cond = calc_expression(
+                &branch_bucket.cond, nodes, vars, component_signal_start,
+                signal_node_idx, subcomponents);
+            match cond {
+                Var::Constant(c) => {
+                    todo!("branch is implemented only for ternary operator")
+                }
+                Var::Variable(node_idx) => {
+                    // The only option for variable condition is a ternary operation.
+
+                    if branch_bucket.if_branch.len() != 1 || branch_bucket.else_branch.len() != 1 {
+                        panic!("Non-constant condition may be used only in ternary operation and both branches of code must be of length 1");
+                    }
+                    let if_branch = try_signal_store(
+                        &branch_bucket.if_branch[0], nodes, vars,
+                        component_signal_start, signal_node_idx, subcomponents);
+                    let else_branch = try_signal_store(
+                        &branch_bucket.else_branch[0], nodes, vars,
+                        component_signal_start, signal_node_idx, subcomponents);
+                    match (if_branch, else_branch) {
+                        (Some((if_signal_idx, if_src)), Some((else_signal_idx, else_src))) => {
+                            if if_signal_idx != else_signal_idx {
+                                panic!("if and else branches must store to the same signal");
+                            }
+
+                            let node_idx_if = operator_argument_instruction(
+                                if_src, nodes, signal_node_idx, vars,
+                                component_signal_start, subcomponents);
+
+                            let node_idx_else = operator_argument_instruction(
+                                else_src, nodes, signal_node_idx, vars,
+                                component_signal_start, subcomponents);
+
+                            let node = Node::TresOp(Operation::TernCond, node_idx, node_idx_if, node_idx_else);
+                            nodes.push(node);
+                            assert_eq!(
+                                signal_node_idx[if_signal_idx],
+                                usize::MAX,
+                                "signal already set"
+                            );
+                            signal_node_idx[if_signal_idx] = node_idx;
+                        }
+                        _ => {
+                            panic!(
+                                "if branch or else branch is not a store to the signal, which is the only option for ternary operation {} {}",
+                                branch_bucket.if_branch[0].to_string(),
+                                branch_bucket.else_branch[0].to_string());
+                        }
+                    }
+                }
             }
-            // operator_argument_instruction()
-            // branch_bucket.if_branch
-            panic!(
-                "not implemented: {} {}",
-                branch_bucket.if_branch.len(),
-                branch_bucket.else_branch.len()
-            );
         }
         Instruction::Return(_) => {
             panic!("not implemented");
         }
         Instruction::Assert(_) => {
-            panic!("not implemented");
+            // asserts are not supported in witness graph
+            // panic!("not implemented");
         }
         Instruction::Log(_) => {
             panic!("not implemented");
@@ -855,6 +968,7 @@ fn build_unary_op_var(
         Var::Constant(ref a) => {
             Var::Constant(match compute_bucket.op {
                 OperatorType::ToAddress => a.clone(),
+                OperatorType::PrefixSub => if a.clone() == U256::ZERO { U256::ZERO } else { M - a }
                 _ => {
                     todo!(
                         "unary operator not implemented: {}",
@@ -863,8 +977,19 @@ fn build_unary_op_var(
                 }
             })
         },
-        Var::Variable( .. ) => {
-            panic!("not implemented");
+        Var::Variable( node_idx ) => {
+            let node = Node::UnoOp(match compute_bucket.op {
+                OperatorType::PrefixSub => Operation::Neg,
+                OperatorType::ToAddress => { panic!("operator does not support variable address") },
+                _ => {
+                    todo!(
+                        "operator not implemented: {}",
+                        compute_bucket.op.to_string()
+                    );
+                }
+            }, node_idx.clone());
+            nodes.push(node);
+            Var::Variable(nodes.len() - 1)
         }
     }
 }
@@ -910,6 +1035,14 @@ fn build_binary_op_var(
             Var::Constant(match compute_bucket.op {
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::Add => a.add_mod(b.clone(), M),
+                OperatorType::Div => if b.clone() == U256::ZERO {
+                    // as we are simulating a circuit execution with signals
+                    // values all equal to 0, just return 0 here in case of
+                    // division by zero
+                    U256::ZERO
+                } else {
+                    a.mul_mod(b.inv_mod(M).unwrap(), M)
+                },
                 OperatorType::NotEq => U256::from(a != b),
                 OperatorType::AddAddress => a + b,
                 OperatorType::MulAddress => a * b,
@@ -925,6 +1058,7 @@ fn build_binary_op_var(
             let node = Node::Op(match compute_bucket.op {
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::Add => Operation::Add,
+                OperatorType::Div => Operation::Div,
                 OperatorType::NotEq => Operation::Neq,
                 _ => {
                     todo!(
@@ -962,10 +1096,10 @@ fn calc_expression(
             subcomponents,
         ),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Lesser | OperatorType::Add | OperatorType::NotEq | OperatorType::AddAddress | OperatorType::MulAddress => {
+            OperatorType::Lesser | OperatorType::Add | OperatorType::Div | OperatorType::NotEq | OperatorType::AddAddress | OperatorType::MulAddress => {
                 build_binary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
-            OperatorType::ToAddress => {
+            OperatorType::ToAddress | OperatorType::PrefixSub => {
                 build_unary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
             _ => {
@@ -1065,7 +1199,7 @@ fn print_instruction(inst: &InstructionPointer) {
 fn get_constants(circuit: &Circuit) -> Vec<Node> {
     let mut constants: Vec<Node> = Vec::new();
     for c in &circuit.c_producer.field_tracking {
-        constants.push(Constant(U256::from_str_radix(c.as_str(), 10).unwrap()));
+        constants.push(Node::Constant(U256::from_str_radix(c.as_str(), 10).unwrap()));
     }
     constants
 }
