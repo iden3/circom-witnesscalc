@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::{env, fs};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
-use witness::graph::{optimize, Node, Operation};
+use witness::graph::{optimize, Node, Operation, UnoOperation};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -299,7 +299,7 @@ fn build_node_from_instruction(
                         component_signal_start,
                         subcomponents,
                     );
-                    return Node::UnoOp(Operation::Neg, arg1);
+                    return Node::UnoOp(UnoOperation::Neg, arg1);
                 }
                 _ => {
                     panic!("not implemented: this operator is not supported to be converted to Node: {}", inst.to_string());
@@ -886,7 +886,7 @@ fn build_unary_op_var(
         },
         Var::Variable( node_idx ) => {
             let node = Node::UnoOp(match compute_bucket.op {
-                OperatorType::PrefixSub => Operation::Neg,
+                OperatorType::PrefixSub => UnoOperation::Neg,
                 OperatorType::ToAddress => { panic!("operator does not support variable address") },
                 _ => {
                     todo!(
@@ -1374,7 +1374,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
             Node::MontConstant(_) => {panic!("no montgomery constant expected in unoptimized graph")},
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),
-            Node::UnoOp(op, a) => op.eval_uno(values[a]),
+            Node::UnoOp(op, a) => op.eval(values[a]),
             Node::TresOp(op, a, b, c) => op.eval_tres(values[a], values[b], values[c]),
         };
         values.push(value);

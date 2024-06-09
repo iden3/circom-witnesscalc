@@ -1,4 +1,4 @@
-use crate::graph::{Node, Operation};
+use crate::graph::{Node, Operation, UnoOperation};
 use ruint::{aliases::U256, uint};
 use std::{ptr, sync::Mutex};
 use std::collections::HashSet;
@@ -100,7 +100,7 @@ fn binop(op: Operation, to: *mut FrElement, a: *const FrElement, b: *const FrEle
     constant.push(ca && cb);
 }
 
-fn unoop(op: Operation, to: *mut FrElement, a: *const FrElement) {
+fn unoop(op: UnoOperation, to: *mut FrElement, a: *const FrElement) {
     let mut nodes = NODES.lock().unwrap();
     let mut values = VALUES.lock().unwrap();
     let mut constant = CONSTANT.lock().unwrap();
@@ -113,7 +113,7 @@ fn unoop(op: Operation, to: *mut FrElement, a: *const FrElement) {
     *to = nodes.len() - 1;
 
     let va = values[a];
-    values.push(op.eval_uno(va));
+    values.push(op.eval(va));
 
     let ca = constant[a];
     constant.push(ca);
@@ -270,7 +270,7 @@ pub unsafe fn Fr_band(to: *mut FrElement, a: *const FrElement, b: *const FrEleme
 }
 
 pub unsafe fn Fr_neg(to: *mut FrElement, a: *const FrElement) {
-    unoop(Operation::Neg, to, a);
+    unoop(UnoOperation::Neg, to, a);
 }
 
 pub fn Fr_div(to: *mut FrElement, a: *const FrElement, b: *const FrElement) {

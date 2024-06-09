@@ -49,10 +49,32 @@ pub enum Operation {
     Shl,
     Shr,
     Band,
-    Neg,
     Div,
     Idiv,
     TernCond,
+}
+
+#[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
+pub enum UnoOperation {
+    Neg,
+}
+
+impl UnoOperation {
+    pub fn eval(&self, a: U256) -> U256 {
+        match self {
+            UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
+        }
+    }
+
+    pub fn eval_fr_uno(&self, a: Fr) -> Fr {
+        match self {
+            UnoOperation::Neg => if a.is_zero() { Fr::zero() } else {
+                let mut x = Fr::MODULUS;
+                x.sub_with_borrow(&a.into_bigint());
+                Fr::from_bigint(x).unwrap()
+            },
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,7 +83,7 @@ pub enum Node {
     Constant(U256),
     #[serde(serialize_with = "ark_se", deserialize_with = "ark_de")]
     MontConstant(Fr),
-    UnoOp(Operation, usize),
+    UnoOp(UnoOperation, usize),
     Op(Operation, usize, usize),
     TresOp(Operation, usize, usize, usize),
 }
@@ -113,13 +135,6 @@ impl Operation {
         }
     }
 
-    pub fn eval_uno(&self, a: U256) -> U256 {
-        match self {
-            Operation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
-            _ => unimplemented!("operator {:?} not implemented for UNO operation", self),
-        }
-    }
-
     pub fn eval_tres(&self, a: U256, b: U256, c: U256) -> U256 {
         match self {
             Operation::TernCond => if a == U256::ZERO { c } else { b },
@@ -146,17 +161,6 @@ impl Operation {
                 }
             },
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
-        }
-    }
-
-    pub fn eval_fr_uno(&self, a: Fr) -> Fr {
-        match self {
-            Operation::Neg => if a.is_zero() { Fr::zero() } else {
-                let mut x = Fr::MODULUS;
-                x.sub_with_borrow(&a.into_bigint());
-                Fr::from_bigint(x).unwrap()
-            },
-            _ => unimplemented!("operator {:?} not implemented for UNO operation", self),
         }
     }
 
@@ -305,7 +309,7 @@ pub fn propagate(nodes: &mut [Node]) {
             }
         } else if let Node::UnoOp(op, a) = nodes[i] {
             if let Node::Constant(va) = nodes[a] {
-                nodes[i] = Node::Constant(op.eval_uno(va));
+                nodes[i] = Node::Constant(op.eval(va));
                 constants += 1;
             }
         } else if let Node::TresOp(op, a, b, c) = nodes[i] {
