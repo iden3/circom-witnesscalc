@@ -48,6 +48,34 @@ https://github.com/philsippl/circom-witness-rs/blob/e889cedde49a8929812b825aede5
 
 ## Build witness from intermediate representation
 
+To create a circuit graph file from a Circom 2 program, run the following command:
+
 ```shell
-cargo run --package witness --bin build-circuit <path to circuit.circom> [-l <path to circom libs>]
+cargo run --package witness --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]*
+```
+
+## Calculate witness from circuit graph created on previous step
+
+> Note: In the inputs file all values of signals should be arrays. Even if they have a single value.
+
+To generate a witness file from a circuit graph and inputs, run the following command.
+
+```shell
+cargo run --package witness --bin calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
+```
+
+## Run circuits tests
+
+To run circuits tests, first get the iden3/circomlib repository
+
+```shell
+git clone git@github.com:iden3/circomlib.git
+```
+
+Also, you need to have the following commands installed: `circom`, `snarkjs` and `curl`.
+
+Now run the `test_circuits.sh` script.
+
+```shell
+./test_circuits.sh
 ```

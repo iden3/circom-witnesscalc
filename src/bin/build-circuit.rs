@@ -1134,10 +1134,17 @@ fn run_template(
     // TODO: assert all components run
 }
 
-fn parse_args() -> (String, Vec<PathBuf>) {
+struct Args {
+    circuit_file: String,
+    graph_file: String,
+    link_libraries: Vec<PathBuf>,
+}
+
+fn parse_args() -> Args {
     let args: Vec<String> = env::args().collect();
     let mut i = 1;
     let mut circuit_file: Option<String> = None;
+    let mut graph_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
     while i < args.len() {
         if args[i] == "-l" {
@@ -1150,20 +1157,33 @@ fn parse_args() -> (String, Vec<PathBuf>) {
             link_libraries.push(args[i][2..].to_string().into())
         } else if args[i].starts_with("-") {
             panic!("unknown argument: {}", args[i]);
-        } else {
+        } else if let None = circuit_file {
             circuit_file = Some(args[i].clone());
+        } else if let None = graph_file {
+            graph_file = Some(args[i].clone());
+        } else {
+            panic!("unexpected argument: {}", args[i]);
         }
         i += 1;
     };
 
-    match circuit_file {
-        Some(circuit_file) => (circuit_file, link_libraries),
-        None => panic!("missing circuit file"),
+    let usage = |err_msg| {
+        eprintln!("{}", err_msg);
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]*", args[0]);
+        std::process::exit(1);
+        "".to_string()
+    };
+
+
+    Args {
+        circuit_file: circuit_file.unwrap_or_else(|| {usage("missing circuit file")}),
+        graph_file: graph_file.unwrap_or_else(|| {usage("missing graph file")}),
+        link_libraries,
     }
 }
 
 fn main() {
-    let (circuit_file, link_libraries) = parse_args();
+    let args = parse_args();
 
     let version = "2.1.9";
 
@@ -1171,7 +1191,8 @@ fn main() {
     // let main_file = "/Users/alek/src/circuits/circuits/authV2.circom";
     // let link_libraries: Vec<PathBuf> =
     //     vec!["/Users/alek/src/circuits/node_modules/circomlib/circuits".into()];
-    let parser_result = parser::run_parser(circuit_file, version, link_libraries);
+    let parser_result = parser::run_parser(
+        args.circuit_file.clone(), version, args.link_libraries.clone());
     let mut program_archive = match parser_result {
         Err((file_library, report_collection)) => {
             Report::print_reports(&report_collection, &file_library);
@@ -1286,9 +1307,10 @@ fn main() {
     // }
 
     let bytes = postcard::to_stdvec(&(&nodes, &signals, &input_signals)).unwrap();
-    std::fs::write("graph_v2.bin", bytes).unwrap();
+    // "graph_v2.bin"
+    std::fs::write(&args.graph_file, bytes).unwrap();
 
-    println!("YAHOO")
+    println!("circuit graph saved to file: {}", &args.graph_file)
 }
 
 #[cfg(test)]

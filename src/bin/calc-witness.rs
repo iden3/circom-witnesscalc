@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::env;
 use std::fs::File;
+use std::path::PathBuf;
 use ruint::aliases::U256;
 use ruint::uint;
 use witness::{get_inputs_buffer, graph};
@@ -49,16 +51,39 @@ fn conv(a: &U256) -> FieldElement<32> {
     x.into()
 }
 
+struct Args {
+    graph_file: String,
+    inputs_file: String,
+    witness_file: String,
+}
+
+fn parse_args() -> Args {
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 4 {
+        eprintln!("Usage: {} <graph.bin> <inputs.json> <witness.wtns>", args[0]);
+        std::process::exit(1);
+    }
+
+    Args {
+        graph_file: args[1].clone(),
+        inputs_file: args[2].clone(),
+        witness_file: args[3].clone(),
+    }
+}
+
+
 
 fn main() {
-    let inputs_file = "/Users/alek/src/simple-circuit/circuit3_inputs.json";
-    let graph_file = "/Users/alek/src/witness/graph_v2.bin";
-    let witness_file = "/Users/alek/src/simple-circuit/output.wtns";
+    // let inputs_file = "/Users/alek/src/simple-circuit/circuit3_inputs.json";
+    // let graph_file = "/Users/alek/src/witness/graph_v2.bin";
+    // let witness_file = "/Users/alek/src/simple-circuit/output.wtns";
 
-    let inputs_data = std::fs::read(inputs_file).expect("Failed to read input file");
+    let args = parse_args();
+
+    let inputs_data = std::fs::read(&args.inputs_file).expect("Failed to read input file");
     let inputs: HashMap<String, Vec<U256>> = serde_json::from_slice(inputs_data.as_slice()).unwrap();
 
-    let graph_data = std::fs::read(graph_file).expect("Failed to read graph file");
+    let graph_data = std::fs::read(&args.graph_file).expect("Failed to read graph file");
 
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, HashMap<String, (usize, usize)>) =
         postcard::from_bytes(graph_data.as_slice()).unwrap();
@@ -84,8 +109,9 @@ fn main() {
     let mut wtns_f = wtns_file::WtnsFile::from_vec(vec_witness, conv(&M));
     wtns_f.version = 2;
     {
-        let f = File::create(witness_file).unwrap();
+        let f = File::create(&args.witness_file).unwrap();
         wtns_f.write(f).unwrap();
     }
+    println!("witness saved to {}", &args.witness_file);
 
 }
