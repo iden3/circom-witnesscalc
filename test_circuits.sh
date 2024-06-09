@@ -4,7 +4,7 @@ set -eu
 
 ptau_url="https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_08.ptau"
 
-required_commands=(circom snarkjs curl cargo)
+required_commands=(circom snarkjs curl cargo node cmp)
 
 RED='\033[0;31m'
 NC='\033[0m' # No Color
@@ -38,8 +38,6 @@ if [ ! -d "$circomlib_path" ]; then
   exit 1
 fi
 
-#cd "$workdir"
-
 for circuit_path in "${script_dir}"/test_circuits/*.circom; do
   circuit_path=$(realpath "$circuit_path")
   echo "Running $circuit_path"
@@ -63,8 +61,15 @@ for circuit_path in "${script_dir}"/test_circuits/*.circom; do
   # run commands from the working directory
   pushd "$workdir" > /dev/null
 
-  circom -l "${circomlib_path}" --r1cs "$circuit_path"
+  circom -l "${circomlib_path}" --r1cs --wasm "$circuit_path"
+  node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
+
   snarkjs wtns check "${circuit_name}".r1cs "${witness_path}"
+  snarkjs wtns check "${circuit_name}".r1cs "${witness_path}2"
+  if ! cmp -s "${witness_path}" "${witness_path}2"; then
+    echo -e "${RED}Witnesses do not match${NC}"
+    exit 1
+  fi
 
   snarkjs groth16 setup "${circuit_name}".r1cs "$ptau_path" "${circuit_name}"_0000.zkey
   ENTROPY1=$(head -c 64 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
