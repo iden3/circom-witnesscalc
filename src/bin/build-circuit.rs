@@ -1,14 +1,13 @@
 use compiler::circuit_design::template::{TemplateCode};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, StoreBucket, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, StatusInput, ValueBucket, ValueType};
 use compiler::intermediate_representation::InstructionList;
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
 use ruint::uint;
 use std::collections::HashMap;
-use std::env;
-use std::fmt::{Display};
+use std::{env, fs};
 use std::path::PathBuf;
 use type_analysis::check_types::check_types;
 use witness::graph::{optimize, Node, Operation};
@@ -134,8 +133,6 @@ fn value_from_instruction_usize(inst: &InstructionPointer) -> usize {
             panic!("not implemented");
         }
     }
-    panic!("not implemented");
-    0
 }
 
 fn int_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> U256 {
@@ -189,10 +186,7 @@ fn operator_argument_instruction(
                         assert_ne!(signal_node, usize::MAX, "signal is not set yet");
                         return signal_node;
                     }
-                    LocationRule::Mapped {
-                        signal_code,
-                        indexes,
-                    } => {
+                    LocationRule::Mapped { .. } => {
                         todo!()
                     }
                 },
@@ -226,7 +220,8 @@ fn operator_argument_instruction(
                                 .unwrap()
                                 .signal_offset;
                             println!(
-                                "Load subcomponent signal: [{}] {} + {} = {}",
+                                "Load subcomponent signal: ({}) [{}] {} + {} = {}",
+                                template_header.as_ref().unwrap_or(&"".to_string()),
                                 subcomponent_idx,
                                 signal_offset,
                                 signal_idx,
@@ -1208,6 +1203,7 @@ fn init_input_signals(
     circuit: &Circuit,
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
+    input_file: Option<String>,
 ) -> HashMap<String, (usize, usize)> {
     let input_list = circuit.c_producer.get_main_input_list();
     let mut signal_values: Vec<U256> = Vec::new();
@@ -1216,12 +1212,45 @@ fn init_input_signals(
     signal_node_idx[0] = nodes.len() - 1;
     let mut inputs_info = HashMap::new();
 
+    let inputs: Option<HashMap<String, Vec<U256>>> = match input_file {
+        Some(file) => {
+            let inputs_data = std::fs::read(file).expect("Failed to read input file");
+            Some(serde_json::from_slice::<HashMap<String, Vec<U256>>>(inputs_data.as_slice()).unwrap())
+        }
+        None => {
+            None
+        }
+    };
+
     for (name, offset, len) in input_list {
         inputs_info.insert(name.clone(), (signal_values.len(), len.clone()));
-        for i in 0..*len {
-            signal_values.push(U256::ZERO);
-            nodes.push(Node::Input(signal_values.len() - 1));
-            signal_node_idx[offset + i] = nodes.len() - 1;
+        match inputs {
+            Some(ref inputs) => {
+                match inputs.get(name) {
+                    Some(values) => {
+                        if values.len() != *len {
+                            panic!(
+                                "input signal {} has different length in inputs file, want {}, actual {}",
+                                name, *len, values.len());
+                        }
+                        for (i, v) in values.iter().enumerate() {
+                            signal_values.push(v.clone());
+                            nodes.push(Node::Input(signal_values.len() - 1));
+                            signal_node_idx[offset + i] = nodes.len() - 1;
+                        }
+                    }
+                    None => {
+                        panic!("input signal {} is not found in inputs file", name);
+                    }
+                }
+            }
+            None => {
+                for i in 0..*len {
+                    signal_values.push(U256::ZERO);
+                    nodes.push(Node::Input(signal_values.len() - 1));
+                    signal_node_idx[offset + i] = nodes.len() - 1;
+                }
+            }
         }
     }
 
@@ -1270,6 +1299,7 @@ fn run_template(
 
 struct Args {
     circuit_file: String,
+    inputs_file: Option<String>,
     graph_file: String,
     link_libraries: Vec<PathBuf>,
 }
@@ -1280,37 +1310,55 @@ fn parse_args() -> Args {
     let mut circuit_file: Option<String> = None;
     let mut graph_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
+    let mut inputs_file: Option<String> = None;
+
+    let usage = |err_msg: &str| -> String {
+        eprintln!("{}", err_msg);
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>]", args[0]);
+        std::process::exit(1);
+    };
+
     while i < args.len() {
         if args[i] == "-l" {
             i += 1;
             if i >= args.len() {
-                panic!("missing argument for -l");
+                usage("missing argument for -l");
             }
             link_libraries.push(args[i].clone().into());
         } else if args[i].starts_with("-l") {
             link_libraries.push(args[i][2..].to_string().into())
+        } else if args[i] == "-i" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for -i");
+            }
+            if let None = inputs_file {
+                inputs_file = Some(args[i].clone());
+            } else {
+                usage("multiple inputs files");
+            }
+        } else if args[i].starts_with("-i") {
+            if let None = inputs_file {
+                inputs_file = Some(args[i][2..].to_string());
+            } else {
+                usage("multiple inputs files");
+            }
         } else if args[i].starts_with("-") {
-            panic!("unknown argument: {}", args[i]);
+            let message = format!("unknown argument: {}", args[i]);
+            usage(&message);
         } else if let None = circuit_file {
             circuit_file = Some(args[i].clone());
         } else if let None = graph_file {
             graph_file = Some(args[i].clone());
         } else {
-            panic!("unexpected argument: {}", args[i]);
+            usage(format!("unexpected argument: {}", args[i]).as_str());
         }
         i += 1;
     };
 
-    let usage = |err_msg| {
-        eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]*", args[0]);
-        std::process::exit(1);
-        "".to_string()
-    };
-
-
     Args {
         circuit_file: circuit_file.unwrap_or_else(|| {usage("missing circuit file")}),
+        inputs_file,
         graph_file: graph_file.unwrap_or_else(|| {usage("missing graph file")}),
         link_libraries,
     }
@@ -1400,7 +1448,8 @@ fn main() {
 
     let mut nodes: Vec<Node> = Vec::new();
     nodes.extend(get_constants(&circuit));
-    let input_signals = init_input_signals(&circuit, &mut nodes, &mut signal_node_idx);
+    let input_signals = init_input_signals(
+        &circuit, &mut nodes, &mut signal_node_idx, args.inputs_file);
 
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
