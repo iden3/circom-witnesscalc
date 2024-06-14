@@ -29,9 +29,7 @@ fn try_signal_store<'a>(
         Instruction::Store(ref store_bucket) => store_bucket,
         _ => return None,
     };
-    if let AddressType::Signal = store_bucket.dest_address_type {
-
-    } else { return None; };
+    if let AddressType::Signal = store_bucket.dest_address_type {} else { return None; };
     match &store_bucket.dest {
         LocationRule::Indexed {
             location,
@@ -91,7 +89,6 @@ fn operator_argument_instruction_n(
     subcomponents: &Vec<Option<ComponentInstance>>,
     size: usize,
 ) -> Vec<usize> {
-
     assert!(size > 0, "size = {}", size);
 
     if size == 1 {
@@ -132,11 +129,11 @@ fn operator_argument_instruction_n(
                         }
                         return result;
                     }
-                    LocationRule::Mapped {..} => {
+                    LocationRule::Mapped { .. } => {
                         todo!()
                     }
                 },
-                AddressType::SubcmpSignal {..} => {
+                AddressType::SubcmpSignal { .. } => {
                     panic!("multi-index load is not implemented for SubcmpSignal");
                 }
                 AddressType::Variable => {
@@ -246,7 +243,29 @@ fn operator_argument_instruction(
                     }
                 }
                 AddressType::Variable => {
-                    panic!("not implemented getting operand for variable");
+                    match load_bucket.src {
+                        LocationRule::Indexed { ref location, .. } => {
+                            let var_idx = calc_expression(
+                                location, nodes, vars, component_signal_start,
+                                signal_node_idx, subcomponents);
+                            let var_idx = if let Var::Value(c) = var_idx {
+                                bigint_to_usize(&c)
+                            } else {
+                                panic!("variable index is not a constant");
+                            };
+                            return match vars[var_idx] {
+                                Some(Var::Node(idx)) => idx,
+                                Some(Var::Value(ref v)) => {
+                                    nodes.push(Node::Constant(v.clone()));
+                                    nodes.len() - 1
+                                }
+                                None => { panic!("variable is not set"); }
+                            };
+                        }
+                        LocationRule::Mapped { .. } => {
+                            todo!()
+                        }
+                    }
                 }
             }
         }
@@ -607,7 +626,6 @@ fn process_instruction(
             while check_continue_condition(
                 &loop_bucket.continue_condition, nodes, vars,
                 component_signal_start, signal_node_idx, subcomponents) {
-
                 for i in &loop_bucket.body {
                     process_instruction(
                         i,
@@ -698,7 +716,8 @@ fn fmt_create_cmp_bucket(
 
     let sub_cmp_id = match sub_cmp_id {
         Var::Value(ref c) => format!("Constant {}", c.to_string()),
-        Var::Node(idx) => format!("Variable {}", idx) };
+        Var::Node(idx) => format!("Variable {}", idx)
+    };
 
     format!(
         r#"CreateCmpBucket: template_id: {}
@@ -859,13 +878,13 @@ fn load(
                 let var_idx = if let Var::Value(c) = var_idx {
                     bigint_to_usize(&c)
                 } else {
-                    panic!("signal index is not a constant");
+                    panic!("variable index is not a constant");
                 };
 
                 return match vars[var_idx] {
                     Some(ref v) => v.clone(),
                     None => panic!("variable is not set yet"),
-                }
+                };
             }
             LocationRule::Mapped { .. } => {
                 todo!()
@@ -882,7 +901,6 @@ fn build_unary_op_var(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> Var {
-
     assert_eq!(compute_bucket.stack.len(), 1);
     let a = calc_expression(
         &compute_bucket.stack[0],
@@ -905,11 +923,11 @@ fn build_unary_op_var(
                     );
                 }
             })
-        },
-        Var::Node(node_idx ) => {
+        }
+        Var::Node(node_idx) => {
             let node = Node::UnoOp(match compute_bucket.op {
                 OperatorType::PrefixSub => UnoOperation::Neg,
-                OperatorType::ToAddress => { panic!("operator does not support variable address") },
+                OperatorType::ToAddress => { panic!("operator does not support variable address") }
                 _ => {
                     todo!(
                         "operator not implemented: {}",
@@ -932,7 +950,6 @@ fn build_binary_op_var(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
 ) -> Var {
-
     assert_eq!(compute_bucket.stack.len(), 2);
     let a = calc_expression(
         &compute_bucket.stack[0],
@@ -962,6 +979,7 @@ fn build_binary_op_var(
     match (&a, &b) {
         (Var::Value(ref a), Var::Value(ref b)) => {
             Var::Value(match compute_bucket.op {
+                OperatorType::Mul => Operation::Mul.eval(a.clone(), b.clone()),
                 OperatorType::Div => if b.clone() == U256::ZERO {
                     // as we are simulating a circuit execution with signals
                     // values all equal to 0, just return 0 here in case of
@@ -985,9 +1003,10 @@ fn build_binary_op_var(
                     );
                 }
             })
-        },
+        }
         _ => {
             let node = Node::Op(match compute_bucket.op {
+                OperatorType::Mul => Operation::Mul,
                 OperatorType::Div => Operation::Div,
                 OperatorType::Add => Operation::Add,
                 OperatorType::Sub => Operation::Sub,
@@ -1026,10 +1045,10 @@ fn calc_expression(
             load_bucket, nodes, vars, component_signal_start, signal_node_idx,
             subcomponents),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Div | OperatorType::Add | OperatorType::Sub
-            | OperatorType::ShiftR | OperatorType::Lesser | OperatorType::NotEq
-            | OperatorType::BitAnd | OperatorType::MulAddress
-            | OperatorType::AddAddress => {
+            OperatorType::Mul | OperatorType::Div | OperatorType::Add
+            | OperatorType::Sub | OperatorType::ShiftR | OperatorType::Lesser
+            | OperatorType::NotEq | OperatorType::BitAnd
+            | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
                     signal_node_idx, subcomponents)
@@ -1240,9 +1259,9 @@ fn parse_args() -> Args {
     };
 
     Args {
-        circuit_file: circuit_file.unwrap_or_else(|| {usage("missing circuit file")}),
+        circuit_file: circuit_file.unwrap_or_else(|| { usage("missing circuit file") }),
         inputs_file,
-        graph_file: graph_file.unwrap_or_else(|| {usage("missing graph file")}),
+        graph_file: graph_file.unwrap_or_else(|| { usage("missing graph file") }),
         link_libraries,
         print_unoptimized,
     }
@@ -1318,9 +1337,8 @@ fn main() {
             produce_input_log: true,
             wat_flag: false,
         },
-        version,
-    )
-    .unwrap();
+        version)
+        .unwrap();
     println!("prime: {}", circuit.c_producer.prime);
     println!("prime_str: {}", circuit.c_producer.prime_str);
     println!("templates len: {}", circuit.templates.len());
@@ -1401,7 +1419,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
     for (node_idx, &node) in nodes.iter().enumerate() {
         let value = match node {
             Node::Constant(c) => c,
-            Node::MontConstant(_) => {panic!("no montgomery constant expected in unoptimized graph")},
+            Node::MontConstant(_) => { panic!("no montgomery constant expected in unoptimized graph") }
             Node::Input(i) => inputs[i],
             Node::Op(op, a, b) => op.eval(values[a], values[b]),
             Node::UnoOp(op, a) => op.eval(values[a]),
@@ -1410,7 +1428,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
         values.push(value);
 
         let empty_vec: Vec<usize> = Vec::new();
-        let signals_for_node: &Vec<usize>= node_idx_to_signal.get(&node_idx).unwrap_or(&empty_vec);
+        let signals_for_node: &Vec<usize> = node_idx_to_signal.get(&node_idx).unwrap_or(&empty_vec);
 
         let input_idx = signals_for_node.iter().map(|&i| i.to_string()).collect::<Vec<String>>().join(", ");
 

@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::File;
-use std::path::PathBuf;
 use ruint::aliases::U256;
 use ruint::uint;
 use witness::{get_inputs_buffer, graph};
