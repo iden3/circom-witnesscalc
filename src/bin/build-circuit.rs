@@ -297,6 +297,7 @@ lazy_static! {
         m.insert(OperatorType::Div, Operation::Div);
         m.insert(OperatorType::Add, Operation::Add);
         m.insert(OperatorType::Sub, Operation::Sub);
+        m.insert(OperatorType::ShiftR, Operation::Shr);
         m.insert(OperatorType::BitAnd, Operation::Band);
         m
     };
@@ -989,6 +990,7 @@ fn build_binary_op_var(
                 },
                 OperatorType::Add => a.add_mod(b.clone(), M),
                 OperatorType::Sub => a.add_mod(M - b, M),
+                OperatorType::ShiftR => Operation::Shr.eval(a.clone(), b.clone()),
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::NotEq => U256::from(a != b),
                 OperatorType::BitAnd => Operation::Band.eval(a.clone(), b.clone()),
@@ -1007,6 +1009,7 @@ fn build_binary_op_var(
                 OperatorType::Div => Operation::Div,
                 OperatorType::Add => Operation::Add,
                 OperatorType::Sub => Operation::Sub,
+                OperatorType::ShiftR => Operation::Shr,
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::NotEq => Operation::Neq,
                 OperatorType::BitAnd => Operation::Band,
@@ -1046,7 +1049,7 @@ fn calc_expression(
             subcomponents,
         ),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Div | OperatorType::Add | OperatorType::Sub
+            OperatorType::Div | OperatorType::Add | OperatorType::Sub | OperatorType::ShiftR
             | OperatorType::Lesser | OperatorType::NotEq | OperatorType::BitAnd
             | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
