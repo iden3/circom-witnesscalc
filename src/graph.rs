@@ -499,10 +499,8 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Input(..) => (),
             Op(Add | Sub | Mul | Shr | Band | Div | Neq, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
-            UnoOp(Neg, ..) => (),
-            UnoOp(op, ..) => unimplemented!("Operators Montgomery form UNO: {:?}", op),
-            TresOp(TernCond, ..) => (),
-            TresOp(op, ..) => unimplemented!("Operators Montgomery form TRES: {:?}", op),
+            UnoOp(UnoOperation::Neg, ..) => (),
+            TresOp(TresOperation::TernCond, ..) => (),
         }
     }
     eprintln!("Converted to Montgomery form");

@@ -81,6 +81,77 @@ fn int_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> 
     }
 }
 
+fn operator_argument_instruction_n(
+    inst: &InstructionPointer,
+    nodes: &mut Vec<Node>,
+    signal_node_idx: &mut Vec<usize>,
+    vars: &mut Vec<Option<Var>>,
+    component_signal_start: usize,
+    subcomponents: &Vec<Option<ComponentInstance>>,
+    size: usize,
+) -> Vec<usize> {
+
+    assert!(size > 0, "size = {}", size);
+
+    if size == 1 {
+        // operator_argument_instruction implements much more cases than
+        // this function, so we can use it here is size == 1
+        return vec![operator_argument_instruction(
+            inst, nodes, signal_node_idx, vars,
+            component_signal_start, subcomponents)];
+    }
+
+    match **inst {
+        Instruction::Load(ref load_bucket) => {
+            match load_bucket.address_type {
+                AddressType::Signal => match &load_bucket.src {
+                    LocationRule::Indexed {
+                        location,
+                        template_header,
+                    } => {
+                        if template_header.is_some() {
+                            panic!("not implemented: template_header expected to be None");
+                        }
+                        let signal_idx = calc_expression(
+                            location, nodes, vars, component_signal_start,
+                            signal_node_idx, subcomponents);
+                        let signal_idx = if let Var::Constant(c) = signal_idx {
+                            bigint_to_usize(&c)
+                        } else {
+                            panic!("signal index is not a constant")
+                        };
+                        let mut result = Vec::with_capacity(size);
+                        for i in 0..size {
+                            let signal_node = signal_node_idx[component_signal_start + signal_idx + i];
+                            assert_ne!(
+                                signal_node, usize::MAX,
+                                "signal {}/{}/{} is not set yet",
+                                component_signal_start, signal_idx, i);
+                            result.push(signal_node);
+                        }
+                        return result;
+                    }
+                    LocationRule::Mapped { .. } => {
+                        todo!()
+                    }
+                },
+                AddressType::SubcmpSignal {
+                    ref cmp_address, ..
+                } => {
+                    panic!("multi-index load is not implemented for SubcmpSignal");
+                }
+                AddressType::Variable => {
+                    panic!("multi-index load is not implemented for Variable");
+                }
+            }
+        }
+        _ => {
+            panic!("multi-operator is not implemented for instruction: {}", inst.to_string());
+        }
+    }
+}
+
+
 fn operator_argument_instruction(
     inst: &InstructionPointer,
     nodes: &mut Vec<Node>,
@@ -229,26 +300,6 @@ fn build_node_from_instruction(
     match **inst {
         Instruction::Compute(ref compute_bucket) => {
             match &compute_bucket.op {
-                OperatorType::Add => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Add, arg1, arg2);
-                }
                 OperatorType::Mul => {
                     assert_eq!(compute_bucket.stack.len(), 2);
                     let arg1 = operator_argument_instruction(
@@ -289,6 +340,46 @@ fn build_node_from_instruction(
                     );
                     return Node::Op(Operation::Div, arg1, arg2);
                 }
+                OperatorType::Add => {
+                    assert_eq!(compute_bucket.stack.len(), 2);
+                    let arg1 = operator_argument_instruction(
+                        &compute_bucket.stack[0],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    let arg2 = operator_argument_instruction(
+                        &compute_bucket.stack[1],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    return Node::Op(Operation::Add, arg1, arg2);
+                }
+                OperatorType::Sub => {
+                    assert_eq!(compute_bucket.stack.len(), 2);
+                    let arg1 = operator_argument_instruction(
+                        &compute_bucket.stack[0],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    let arg2 = operator_argument_instruction(
+                        &compute_bucket.stack[1],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    return Node::Op(Operation::Sub, arg1, arg2);
+                }
                 OperatorType::PrefixSub => {
                     assert_eq!(compute_bucket.stack.len(), 1);
                     let arg1 = operator_argument_instruction(
@@ -302,7 +393,9 @@ fn build_node_from_instruction(
                     return Node::UnoOp(UnoOperation::Neg, arg1);
                 }
                 _ => {
-                    panic!("not implemented: this operator is not supported to be converted to Node: {}", inst.to_string());
+                    panic!(
+                        "not implemented: this operator is not supported to be converted to Node: {}",
+                        compute_bucket.to_string());
                 }
             }
         }
@@ -342,14 +435,6 @@ fn process_instruction(
                             if template_header.is_some() {
                                 panic!("not implemented: template_header expected to be None");
                             }
-                            let node_idx = operator_argument_instruction(
-                                &store_bucket.src,
-                                nodes,
-                                signal_node_idx,
-                                vars,
-                                component_signal_start,
-                                subcomponents,
-                            );
                             let signal_idx = calc_expression(
                                 location, nodes, vars, component_signal_start,
                                 signal_node_idx, subcomponents);
@@ -366,12 +451,20 @@ fn process_instruction(
                             //     component_signal_start + signal_idx
                             // );
                             let signal_idx = component_signal_start + signal_idx;
-                            assert_eq!(
-                                signal_node_idx[signal_idx],
-                                usize::MAX,
-                                "signal already set"
-                            );
-                            signal_node_idx[signal_idx] = node_idx;
+
+                            let node_idxs = operator_argument_instruction_n(
+                                &store_bucket.src, nodes, signal_node_idx, vars,
+                                component_signal_start, subcomponents,
+                                store_bucket.context.size);
+
+                            assert_eq!(node_idxs.len(), store_bucket.context.size);
+
+                            for i in 0..store_bucket.context.size {
+                                if signal_node_idx[signal_idx + i] != usize::MAX {
+                                    panic!("signal is already set");
+                                }
+                                signal_node_idx[signal_idx + i] = node_idxs[i];
+                            }
                         }
                         // LocationRule::Mapped { signal_code, indexes } => {}
                         _ => {
@@ -426,14 +519,11 @@ fn process_instruction(
                         panic!("subcomponent index is not a constant");
                     };
 
-                    let node_idx = operator_argument_instruction(
-                        &store_bucket.src,
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
+                    let node_idxs = operator_argument_instruction_n(
+                        &store_bucket.src, nodes, signal_node_idx, vars,
+                        component_signal_start, subcomponents,
+                        store_bucket.context.size);
+                    assert_eq!(node_idxs.len(), store_bucket.context.size);
 
                     match store_bucket.dest {
                         LocationRule::Indexed {
@@ -460,16 +550,16 @@ fn process_instruction(
                                 signal_offset + signal_idx
                             );
                             let signal_idx = signal_offset + signal_idx;
-                            assert_eq!(
-                                signal_node_idx[signal_idx],
-                                usize::MAX,
-                                "subcomponent signal is already set"
-                            );
-                            signal_node_idx[signal_idx] = node_idx;
+                            for i in 0..store_bucket.context.size {
+                                if signal_node_idx[signal_idx + i] != usize::MAX {
+                                    panic!("subcomponent signal is already set");
+                                }
+                                signal_node_idx[signal_idx + i] = node_idxs[i];
+                            }
                             subcomponents[subcomponent_idx]
                                 .as_mut()
                                 .unwrap()
-                                .number_of_inputs -= 1;
+                                .number_of_inputs -= store_bucket.context.size;
                         }
                         LocationRule::Mapped { .. } => {
                             todo!()
@@ -937,8 +1027,6 @@ fn build_binary_op_var(
     match (&a, &b) {
         (Var::Constant(ref a), Var::Constant(ref b)) => {
             Var::Constant(match compute_bucket.op {
-                OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
-                OperatorType::Add => a.add_mod(b.clone(), M),
                 OperatorType::Div => if b.clone() == U256::ZERO {
                     // as we are simulating a circuit execution with signals
                     // values all equal to 0, just return 0 here in case of
@@ -947,9 +1035,12 @@ fn build_binary_op_var(
                 } else {
                     a.mul_mod(b.inv_mod(M).unwrap(), M)
                 },
+                OperatorType::Add => a.add_mod(b.clone(), M),
+                OperatorType::Sub => a.add_mod(M - b, M),
+                OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::NotEq => U256::from(a != b),
-                OperatorType::AddAddress => a + b,
                 OperatorType::MulAddress => a * b,
+                OperatorType::AddAddress => a + b,
                 _ => {
                     todo!(
                         "operator not implemented: {}",
@@ -960,9 +1051,10 @@ fn build_binary_op_var(
         },
         _ => {
             let node = Node::Op(match compute_bucket.op {
-                OperatorType::Lesser => Operation::Lt,
-                OperatorType::Add => Operation::Add,
                 OperatorType::Div => Operation::Div,
+                OperatorType::Add => Operation::Add,
+                OperatorType::Sub => Operation::Sub,
+                OperatorType::Lesser => Operation::Lt,
                 OperatorType::NotEq => Operation::Neq,
                 _ => {
                     todo!(
@@ -1000,7 +1092,9 @@ fn calc_expression(
             subcomponents,
         ),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
-            OperatorType::Lesser | OperatorType::Add | OperatorType::Div | OperatorType::NotEq | OperatorType::AddAddress | OperatorType::MulAddress => {
+            OperatorType::Div | OperatorType::Add | OperatorType::Sub
+            | OperatorType::Lesser | OperatorType::NotEq
+            | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
             OperatorType::ToAddress | OperatorType::PrefixSub => {
@@ -1128,7 +1222,7 @@ fn run_template(
     }
 
     for (idx, inst) in tmpl.body.iter().enumerate() {
-        println!("instruction #{}: {}", idx, inst.to_string());
+        println!("instruction {}/{}: {}", tmpl.id, idx, inst.to_string());
         process_instruction(
             &inst,
             nodes,
