@@ -24,6 +24,7 @@ parser = { path = "../circom/parser" }
 type_analysis = { path = "../circom/type_analysis" }
 constraint_generation = { path = "../circom/constraint_generation" }
 wtns-file = "0.1.5"
+lazy_static = "1.4.0"
 
 [build-dependencies]
 cxx-build = "1.0"

@@ -1879,6 +1879,7 @@ dependencies = [
  "cxx-build",
  "eyre",
  "hex",
+ "lazy_static",
  "parser",
  "postcard",
  "program_structure",

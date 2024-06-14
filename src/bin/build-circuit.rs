@@ -8,6 +8,7 @@ use ruint::uint;
 use std::collections::HashMap;
 use std::{env, fs};
 use std::path::PathBuf;
+use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
 use witness::graph::{optimize, Node, Operation, UnoOperation, TresOperation};
 
@@ -289,6 +290,23 @@ fn operator_argument_instruction(
     }
 }
 
+lazy_static! {
+    static ref DUO_OPERATORS_MAP: HashMap<OperatorType, Operation> = {
+        let mut m = HashMap::new();
+        m.insert(OperatorType::Mul, Operation::Mul);
+        m.insert(OperatorType::Div, Operation::Div);
+        m.insert(OperatorType::Add, Operation::Add);
+        m.insert(OperatorType::Sub, Operation::Sub);
+        m.insert(OperatorType::BitAnd, Operation::Band);
+        m
+    };
+    static ref UNO_OPERATORS_MAP: HashMap<OperatorType, UnoOperation> = {
+        let mut m = HashMap::new();
+        m.insert(OperatorType::PrefixSub, UnoOperation::Neg);
+        m
+    };
+}
+
 fn build_node_from_instruction(
     inst: &InstructionPointer,
     nodes: &mut Vec<Node>,
@@ -299,125 +317,39 @@ fn build_node_from_instruction(
 ) -> Node {
     match **inst {
         Instruction::Compute(ref compute_bucket) => {
-            match &compute_bucket.op {
-                OperatorType::Mul => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Mul, arg1, arg2);
-                }
-                OperatorType::Div => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Div, arg1, arg2);
-                }
-                OperatorType::Add => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Add, arg1, arg2);
-                }
-                OperatorType::Sub => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Sub, arg1, arg2);
-                }
-                OperatorType::BitAnd => {
-                    assert_eq!(compute_bucket.stack.len(), 2);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    let arg2 = operator_argument_instruction(
-                        &compute_bucket.stack[1],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::Op(Operation::Band, arg1, arg2);
-                }
-                OperatorType::PrefixSub => {
-                    assert_eq!(compute_bucket.stack.len(), 1);
-                    let arg1 = operator_argument_instruction(
-                        &compute_bucket.stack[0],
-                        nodes,
-                        signal_node_idx,
-                        vars,
-                        component_signal_start,
-                        subcomponents,
-                    );
-                    return Node::UnoOp(UnoOperation::Neg, arg1);
-                }
-                _ => {
-                    panic!(
-                        "not implemented: this operator is not supported to be converted to Node: {}",
-                        compute_bucket.to_string());
-                }
+            if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
+                let arg1 = operator_argument_instruction(
+                    &compute_bucket.stack[0],
+                    nodes,
+                    signal_node_idx,
+                    vars,
+                    component_signal_start,
+                    subcomponents,
+                );
+                let arg2 = operator_argument_instruction(
+                    &compute_bucket.stack[1],
+                    nodes,
+                    signal_node_idx,
+                    vars,
+                    component_signal_start,
+                    subcomponents,
+                );
+                return Node::Op(op.clone(), arg1, arg2);
             }
+            if let Some(op) = UNO_OPERATORS_MAP.get(&compute_bucket.op) {
+                let arg1 = operator_argument_instruction(
+                    &compute_bucket.stack[0],
+                    nodes,
+                    signal_node_idx,
+                    vars,
+                    component_signal_start,
+                    subcomponents,
+                );
+                return Node::UnoOp(op.clone(), arg1);
+            }
+            panic!(
+                "not implemented: this operator is not supported to be converted to Node: {}",
+                compute_bucket.to_string());
         }
         _ => {
             panic!(
