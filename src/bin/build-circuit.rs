@@ -380,6 +380,26 @@ fn build_node_from_instruction(
                     );
                     return Node::Op(Operation::Sub, arg1, arg2);
                 }
+                OperatorType::BitAnd => {
+                    assert_eq!(compute_bucket.stack.len(), 2);
+                    let arg1 = operator_argument_instruction(
+                        &compute_bucket.stack[0],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    let arg2 = operator_argument_instruction(
+                        &compute_bucket.stack[1],
+                        nodes,
+                        signal_node_idx,
+                        vars,
+                        component_signal_start,
+                        subcomponents,
+                    );
+                    return Node::Op(Operation::Band, arg1, arg2);
+                }
                 OperatorType::PrefixSub => {
                     assert_eq!(compute_bucket.stack.len(), 1);
                     let arg1 = operator_argument_instruction(
@@ -1039,6 +1059,7 @@ fn build_binary_op_var(
                 OperatorType::Sub => a.add_mod(M - b, M),
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::NotEq => U256::from(a != b),
+                OperatorType::BitAnd => Operation::Band.eval(a.clone(), b.clone()),
                 OperatorType::MulAddress => a * b,
                 OperatorType::AddAddress => a + b,
                 _ => {
@@ -1056,6 +1077,7 @@ fn build_binary_op_var(
                 OperatorType::Sub => Operation::Sub,
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::NotEq => Operation::Neq,
+                OperatorType::BitAnd => Operation::Band,
                 _ => {
                     todo!(
                         "operator not implemented: {}",
@@ -1093,7 +1115,7 @@ fn calc_expression(
         ),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
             OperatorType::Div | OperatorType::Add | OperatorType::Sub
-            | OperatorType::Lesser | OperatorType::NotEq
+            | OperatorType::Lesser | OperatorType::NotEq | OperatorType::BitAnd
             | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(compute_bucket, nodes, vars, component_signal_start, signal_node_idx, subcomponents)
             }
