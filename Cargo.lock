@@ -1873,6 +1873,7 @@ dependencies = [
  "ark-ff 0.4.2",
  "ark-serialize 0.4.2",
  "byteorder",
+ "code_producers",
  "compiler",
  "constraint_generation",
  "cxx",
