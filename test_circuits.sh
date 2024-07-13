@@ -2,7 +2,7 @@
 
 set -eu
 
-ptau_url="https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_08.ptau"
+ptau_url="https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_09.ptau"
 
 required_commands=(circom snarkjs curl cargo node cmp)
 

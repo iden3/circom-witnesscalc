@@ -138,8 +138,62 @@ fn operator_argument_instruction_n(
                         todo!()
                     }
                 },
-                AddressType::SubcmpSignal { .. } => {
-                    panic!("multi-index load is not implemented for SubcmpSignal");
+                AddressType::SubcmpSignal { ref cmp_address, .. } => {
+                    let subcomponent_idx = calc_expression(
+                        cmp_address, nodes, vars, component_signal_start,
+                        signal_node_idx, subcomponents);
+                    let subcomponent_idx = if let Var::Value(ref c) = subcomponent_idx {
+                        bigint_to_usize(c)
+                    } else {
+                        panic!("signal index is not a constant")
+                    };
+
+                    let (signal_idx, template_header) = match load_bucket.src {
+                        LocationRule::Indexed {
+                            ref location,
+                            ref template_header,
+                        } => {
+                            let signal_idx = calc_expression(
+                                location, nodes, vars, component_signal_start,
+                                signal_node_idx, subcomponents);
+                            if let Var::Value(ref c) = signal_idx {
+                                (bigint_to_usize(c), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
+                            } else {
+                                panic!("signal index is not a constant")
+                            }
+                        }
+                        LocationRule::Mapped { ref signal_code, ref indexes } => {
+                            calc_mapped_signal_idx(
+                                subcomponents, subcomponent_idx, io_map,
+                                signal_code.clone(), indexes, nodes, vars,
+                                component_signal_start, signal_node_idx)
+                        }
+                    };
+                    let signal_offset = subcomponents[subcomponent_idx]
+                        .as_ref()
+                        .unwrap()
+                        .signal_offset;
+                    let location_rule = match load_bucket.src {
+                        LocationRule::Indexed { .. } => "Indexed",
+                        LocationRule::Mapped { .. } => "Mapped",
+                    };
+                    println!(
+                        "Load subcomponent signal (location: {}, template: {}, subcomponent idx: {}, size: {}): {} + {} = {}",
+                        location_rule, template_header, subcomponent_idx, size,
+                        signal_offset, signal_idx, signal_offset + signal_idx);
+
+                    let signal_idx = signal_offset + signal_idx;
+
+                    let mut result = Vec::with_capacity(size);
+                    for i in 0..size {
+                        let signal_node = signal_node_idx[signal_idx + i];
+                        assert_ne!(
+                            signal_node, usize::MAX,
+                            "signal {}/{}/{} is not set yet",
+                            component_signal_start, signal_idx, i);
+                        result.push(signal_node);
+                    }
+                    return result;
                 }
                 AddressType::Variable => {
                     panic!("multi-index load is not implemented for Variable");
@@ -164,15 +218,15 @@ fn operator_argument_instruction(
 ) -> usize {
     match **inst {
         Instruction::Load(ref load_bucket) => {
-            println!("load bucket: {}", load_bucket.src.to_string());
-            println!(
-                "load bucket addr type: {:?}",
-                match load_bucket.address_type {
-                    AddressType::Variable => "Variable",
-                    AddressType::Signal => "Signal",
-                    AddressType::SubcmpSignal { .. } => "SubcmpSignal",
-                }
-            );
+            // println!("load bucket: {}", load_bucket.src.to_string());
+            // println!(
+            //     "load bucket addr type: {:?}",
+            //     match load_bucket.address_type {
+            //         AddressType::Variable => "Variable",
+            //         AddressType::Signal => "Signal",
+            //         AddressType::SubcmpSignal { .. } => "SubcmpSignal",
+            //     }
+            // );
             match load_bucket.address_type {
                 AddressType::Signal => match &load_bucket.src {
                     LocationRule::Indexed {
@@ -556,14 +610,15 @@ fn process_instruction(
                         .as_ref()
                         .unwrap()
                         .signal_offset;
+                    let location = match store_bucket.dest {
+                        LocationRule::Indexed { .. } => "Indexed",
+                        LocationRule::Mapped { .. } => "Mapped",
+                    };
                     println!(
-                        "Store subcomponent signal: ({}) [{}] {} + {} = {}",
-                        template_header,
-                        subcomponent_idx,
-                        signal_offset,
-                        signal_idx,
-                        signal_offset + signal_idx
-                    );
+                        "Store subcomponent signal (location: {}, template: {}, subcomponent idx: {}, num: {}): {} + {} = {}",
+                        location, template_header, subcomponent_idx,
+                        store_bucket.context.size, signal_offset, signal_idx,
+                        signal_offset + signal_idx);
                     let signal_idx = signal_offset + signal_idx;
                     for i in 0..store_bucket.context.size {
                         if signal_node_idx[signal_idx + i] != usize::MAX {
@@ -647,7 +702,8 @@ fn process_instruction(
                     todo!();
                 }
                 ReturnType::Final( ref final_data ) => {
-                    assert_eq!(final_data.context.size, r.ln);
+                    assert!(final_data.context.size >= r.ln);
+                    // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
                         &final_data.dest_address_type, &final_data.dest,
                         &fn_vars, &r, nodes, vars, component_signal_start,
@@ -969,6 +1025,8 @@ fn run_function(
     }
 
     let f = find_function(&call_bucket.symbol, functions);
+    println!("Run function {}", &call_bucket.symbol);
+
     let mut r: Option<FnReturn> = None;
     for i in &f.body {
         r = process_function_instruction(i, fn_vars, constants);
@@ -1140,7 +1198,7 @@ fn process_function_instruction(
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
-            println!("store bucket: {}", store_bucket.to_string());
+            // println!("store bucket: {}", store_bucket.to_string());
             match store_bucket.dest_address_type {
                 AddressType::Variable => {
                     match &store_bucket.dest {
@@ -1152,7 +1210,7 @@ fn process_function_instruction(
                                 panic!("not implemented: template_header expected to be None");
                             }
                             let lvar_idx = value_from_instruction_usize(location);
-                            println!("store bucket [10]: {} / {}", lvar_idx, store_bucket.context.size);
+                            // println!("store bucket [10]: {} / {}", lvar_idx, store_bucket.context.size);
                             if store_bucket.context.size == 1 {
                                 fn_vars[lvar_idx] = Some(calc_function_expression(
                                     &store_bucket.src, fn_vars, constants, false));
@@ -1523,11 +1581,13 @@ fn build_binary_op_var(
                 },
                 OperatorType::Add => a.add_mod(b.clone(), M),
                 OperatorType::Sub => a.add_mod(M - b, M),
+                OperatorType::IntDiv => Operation::Idiv.eval(a.clone(), b.clone()),
                 OperatorType::ShiftR => Operation::Shr.eval(a.clone(), b.clone()),
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::Greater => Operation::Gt.eval(a.clone(), b.clone()),
                 OperatorType::Eq(1) => Operation::Eq.eval(a.clone(), b.clone()),
                 OperatorType::NotEq => U256::from(a != b),
+                OperatorType::BoolAnd => Operation::Land.eval(a.clone(), b.clone()),
                 OperatorType::BitAnd => Operation::Band.eval(a.clone(), b.clone()),
                 OperatorType::MulAddress => a * b,
                 OperatorType::AddAddress => a + b,
@@ -1545,11 +1605,13 @@ fn build_binary_op_var(
                 OperatorType::Div => Operation::Div,
                 OperatorType::Add => Operation::Add,
                 OperatorType::Sub => Operation::Sub,
+                OperatorType::IntDiv => Operation::Idiv,
                 OperatorType::ShiftR => Operation::Shr,
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::Greater => Operation::Gt,
                 OperatorType::Eq(1) => Operation::Eq,
                 OperatorType::NotEq => Operation::Neq,
+                OperatorType::BoolAnd => Operation::Land,
                 OperatorType::BitAnd => Operation::Band,
                 _ => {
                     todo!(
@@ -1583,10 +1645,10 @@ fn calc_expression(
             subcomponents),
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
             OperatorType::Mul | OperatorType::Div | OperatorType::Add
-            | OperatorType::Sub | OperatorType::ShiftR | OperatorType::Lesser
-            | OperatorType::Greater | OperatorType::Eq(1) | OperatorType::NotEq
-            | OperatorType::BitAnd | OperatorType::MulAddress
-            | OperatorType::AddAddress => {
+            | OperatorType::Sub | OperatorType::IntDiv | OperatorType::ShiftR
+            | OperatorType::Lesser | OperatorType::Greater | OperatorType::Eq(1)
+            | OperatorType::NotEq | OperatorType::BoolAnd | OperatorType::BitAnd
+            | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
                     signal_node_idx, subcomponents)
@@ -1721,7 +1783,7 @@ fn run_template(
     }
 
     for (idx, inst) in tmpl.body.iter().enumerate() {
-        println!("instruction {}/{}: {}", tmpl.id, idx, inst.to_string());
+        // println!("instruction {}/{}: {}", tmpl.id, idx, inst.to_string());
         process_instruction(
             &inst, nodes, signal_node_idx, &mut vars, &mut components,
             templates, functions, component_signal_start, constants, io_map);
