@@ -7,7 +7,6 @@ use ruint::aliases::U256;
 use ruint::uint;
 use std::collections::HashMap;
 use std::{env, fs};
-use std::fmt::Debug;
 use std::path::PathBuf;
 use code_producers::c_elements::IODef;
 use code_producers::components::TemplateInstanceIOMap;
@@ -687,7 +686,7 @@ fn process_instruction(
                     Var::Value(c) => {
                         fn_vars[idx] = Some(c);
                     }
-                    Var::Node(node_idx) => {
+                    Var::Node( .. ) => {
                         panic!("can't use signals as arguments to functions");
                     }
                 }
@@ -698,16 +697,15 @@ fn process_instruction(
             let r = run_function(call_bucket, functions, &mut fn_vars, constants);
 
             match call_bucket.return_info {
-                ReturnType::Intermediate{op_aux_no} => {
-                    todo!();
-                }
+                ReturnType::Intermediate{ ..} => { todo!(); }
                 ReturnType::Final( ref final_data ) => {
                     assert!(final_data.context.size >= r.ln);
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
                         &final_data.dest_address_type, &final_data.dest,
                         &fn_vars, &r, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents);
+                        signal_node_idx, subcomponents,
+                        final_data.context.size);
                 }
             }
         }
@@ -842,46 +840,44 @@ fn process_instruction(
 fn store_function_return_results(
     address_type: &AddressType, dest: &LocationRule,
     fn_vars: &Vec<Option<U256>>, ret: &FnReturn,
-    nodes: &mut Vec<Node>,
+    _nodes: &mut Vec<Node>,
     vars: &mut Vec<Option<Var>>,
-    component_signal_start: usize,
-    signal_node_idx: &mut Vec<usize>,
-    subcomponents: &mut Vec<Option<ComponentInstance>>) {
+    _component_signal_start: usize,
+    _signal_node_idx: &mut Vec<usize>,
+    _subcomponents: &mut Vec<Option<ComponentInstance>>,
+    ret_num: usize) {
 
     match address_type {
         AddressType::Signal => {
             match &dest {
-                LocationRule::Indexed {
-                    location,
-                    template_header,
-                } => {
+                LocationRule::Indexed { .. } => {
                     todo!("signal"); // check if following code is correct
-                    if template_header.is_some() {
-                        panic!("not implemented: template_header expected to be None");
-                    }
-                    let signal_idx = calc_expression(
-                        location, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents);
-                    let signal_idx = if let Var::Value(ref c) = signal_idx {
-                        bigint_to_usize(c)
-                    } else {
-                        panic!("signal index is not a constant")
-                    };
-
-                    let signal_idx = component_signal_start + signal_idx;
-
-                    for i in 0..ret.ln {
-                        let v = if let Some(v) = fn_vars[ret.idx + i] {
-                            v
-                        } else {
-                            panic!("return value is not set")
-                        };
-                        nodes.push(Node::Constant(v.clone()));
-                        if signal_node_idx[signal_idx + i] != usize::MAX {
-                            panic!("signal is already set");
-                        }
-                        signal_node_idx[signal_idx + i] = nodes.len() - 1;
-                    }
+                    // if template_header.is_some() {
+                    //     panic!("not implemented: template_header expected to be None");
+                    // }
+                    // let signal_idx = calc_expression(
+                    //     location, _nodes, vars, _component_signal_start,
+                    //     _signal_node_idx, _subcomponents);
+                    // let signal_idx = if let Var::Value(ref c) = signal_idx {
+                    //     bigint_to_usize(c)
+                    // } else {
+                    //     panic!("signal index is not a constant")
+                    // };
+                    //
+                    // let signal_idx = _component_signal_start + signal_idx;
+                    //
+                    // for i in 0..ret.ln {
+                    //     let v = if let Some(v) = fn_vars[ret.idx + i] {
+                    //         v
+                    //     } else {
+                    //         panic!("return value is not set")
+                    //     };
+                    //     _nodes.push(Node::Constant(v.clone()));
+                    //     if _signal_node_idx[signal_idx + i] != usize::MAX {
+                    //         panic!("signal is already set");
+                    //     }
+                    //     _signal_node_idx[signal_idx + i] = _nodes.len() - 1;
+                    // }
                 }
                 LocationRule::Mapped { .. } => { todo!() }
             }
@@ -897,7 +893,7 @@ fn store_function_return_results(
                     }
                     let lvar_idx = value_from_instruction_usize(location);
 
-                    for i in 0..ret.ln {
+                    for i in 0..ret_num {
                         let v = if let Some(v) = fn_vars[ret.idx + i] {
                             v
                         } else {
@@ -909,110 +905,7 @@ fn store_function_return_results(
                 LocationRule::Mapped { .. } => { todo!() }
             }
         }
-        AddressType::SubcmpSignal {
-            ref cmp_address,
-            ref input_information,
-            ..
-        } => {
-            todo!("SubcmpSignal");
-            // let input_status: &StatusInput;
-            // if let InputInformation::Input { ref status } = input_information {
-            //     input_status = status;
-            // } else {
-            //     panic!("incorrect input information for subcomponent signal");
-            // }
-            // let subcomponent_idx = calc_expression(
-            //     cmp_address, nodes, vars, component_signal_start,
-            //     signal_node_idx, subcomponents);
-            // let subcomponent_idx = if let Var::Value(ref c) = subcomponent_idx {
-            //     bigint_to_usize(&c)
-            // } else {
-            //     panic!("subcomponent index is not a constant");
-            // };
-            //
-            // let node_idxs = operator_argument_instruction_n(
-            //     &store_bucket.src, nodes, signal_node_idx, vars,
-            //     component_signal_start, subcomponents,
-            //     store_bucket.context.size);
-            // assert_eq!(node_idxs.len(), store_bucket.context.size);
-            //
-            // match store_bucket.dest {
-            //     LocationRule::Indexed {
-            //         ref location,
-            //         ref template_header,
-            //     } => {
-            //         let signal_idx = calc_expression(
-            //             location, nodes, vars, component_signal_start,
-            //             signal_node_idx, subcomponents);
-            //         let signal_idx = if let Var::Value(ref c) = signal_idx {
-            //             bigint_to_usize(c)
-            //         } else {
-            //             panic!("signal index is not a constant");
-            //         };
-            //         let signal_offset = subcomponents[subcomponent_idx]
-            //             .as_ref()
-            //             .unwrap()
-            //             .signal_offset;
-            //         println!(
-            //             "Store subcomponent signal: ({}) [{}] {} + {} = {}",
-            //             template_header.as_ref().unwrap_or(&"-".to_string()),
-            //             subcomponent_idx,
-            //             signal_offset,
-            //             signal_idx,
-            //             signal_offset + signal_idx
-            //         );
-            //         let signal_idx = signal_offset + signal_idx;
-            //         for i in 0..store_bucket.context.size {
-            //             if signal_node_idx[signal_idx + i] != usize::MAX {
-            //                 panic!("subcomponent signal is already set");
-            //             }
-            //             signal_node_idx[signal_idx + i] = node_idxs[i];
-            //         }
-            //         subcomponents[subcomponent_idx]
-            //             .as_mut()
-            //             .unwrap()
-            //             .number_of_inputs -= store_bucket.context.size;
-            //     }
-            //     LocationRule::Mapped { .. } => {
-            //         todo!()
-            //     }
-            // }
-            //
-            // let number_of_inputs = subcomponents[subcomponent_idx]
-            //     .as_ref()
-            //     .unwrap()
-            //     .number_of_inputs;
-            //
-            // let run_component = match input_status {
-            //     StatusInput::Last => {
-            //         assert_eq!(number_of_inputs, 0);
-            //         true
-            //     }
-            //     StatusInput::NoLast => {
-            //         assert!(number_of_inputs > 0);
-            //         false
-            //     }
-            //     StatusInput::Unknown => number_of_inputs == 0,
-            // };
-            //
-            // if run_component {
-            //     run_template(
-            //         templates,
-            //         functions,
-            //         subcomponents[subcomponent_idx]
-            //             .as_ref()
-            //             .unwrap()
-            //             .template_id,
-            //         nodes,
-            //         signal_node_idx,
-            //         subcomponents[subcomponent_idx]
-            //             .as_ref()
-            //             .unwrap()
-            //             .signal_offset,
-            //         constants,
-            //     )
-            // }
-        }
+        AddressType::SubcmpSignal { .. } => { todo!("SubcmpSignal"); }
     }
 }
 
@@ -1323,7 +1216,8 @@ fn fmt_create_cmp_bucket(
                  component_offset: {}
                  component_offset_jump: {}
                  number_of_cmp: {}
-                 has_inputs: {}"#,
+                 has_inputs: {}
+                 component_signal_start: {}"#,
         cmp_bucket.template_id,
         cmp_bucket.cmp_unique_id,
         cmp_bucket.symbol,
@@ -1336,7 +1230,8 @@ fn fmt_create_cmp_bucket(
         cmp_bucket.component_offset,
         cmp_bucket.component_offset_jump,
         cmp_bucket.number_of_cmp,
-        cmp_bucket.has_inputs
+        cmp_bucket.has_inputs,
+        component_signal_start,
     )
 }
 
@@ -1782,13 +1677,11 @@ fn run_template(
         components.push(None);
     }
 
-    for (idx, inst) in tmpl.body.iter().enumerate() {
-        // println!("instruction {}/{}: {}", tmpl.id, idx, inst.to_string());
+    for inst in &tmpl.body {
         process_instruction(
             &inst, nodes, signal_node_idx, &mut vars, &mut components,
             templates, functions, component_signal_start, constants, io_map);
     }
-
     // TODO: assert all components run
 }
 
@@ -2013,6 +1906,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
     }
 
     let mut signal_to_witness: HashMap<usize, Vec<usize>> = HashMap::new();
+    println!("Mapping from witness index to signal index:");
     for (witness_idx, &signal_idx) in witness_signals.iter().enumerate() {
         println!("witness {} -> {}", witness_idx, signal_idx);
         signal_to_witness.entry(signal_idx).and_modify(|v| v.push(witness_idx)).or_insert(vec![witness_idx]);
@@ -2020,6 +1914,7 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
 
     let mut values = Vec::with_capacity(nodes.len());
 
+    println!("<node idx> <value> <signal indexes> <witness indexes> <node descr>");
     for (node_idx, &node) in nodes.iter().enumerate() {
         let value = match node {
             Node::Constant(c) => c,
@@ -2034,15 +1929,19 @@ fn evaluate_unoptimized(nodes: &[Node], inputs: &[U256], signal_node_idx: &Vec<u
         let empty_vec: Vec<usize> = Vec::new();
         let signals_for_node: &Vec<usize> = node_idx_to_signal.get(&node_idx).unwrap_or(&empty_vec);
 
-        let input_idx = signals_for_node.iter().map(|&i| i.to_string()).collect::<Vec<String>>().join(", ");
+        let signal_idxs = signals_for_node.iter()
+            .map(|&i| format!("{}_S", i))
+            .collect::<Vec<String>>().join(", ");
 
-        let mut output_signals: Vec<usize> = Vec::new();
+        let mut witness_idxs: Vec<usize> = Vec::new();
         for &signal_idx in signals_for_node {
-            output_signals.extend(signal_to_witness.get(&signal_idx).unwrap_or(&empty_vec));
+            witness_idxs.extend(signal_to_witness.get(&signal_idx).unwrap_or(&empty_vec));
         }
-        let output_signals = output_signals.iter().map(|&i| i.to_string()).collect::<Vec<String>>().join(", ");
+        let output_signals = witness_idxs.iter()
+            .map(|&i| format!("{}_W", i))
+            .collect::<Vec<String>>().join(", ");
 
-        println!("[{:4}] {:>77} ({:>4}) ({:>4}) {:?}", node_idx, value.to_string(), input_idx, output_signals, node);
+        println!("[{:4}] {:>77} ({:>4}) ({:>4}) {:?}", node_idx, value.to_string(), signal_idxs, output_signals, node);
     }
 }
 
