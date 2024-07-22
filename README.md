@@ -6,10 +6,8 @@ This crate provides a fast witness generator for Circom circuits, serving as a d
 
 `circom-witness-rs` comes with two modes:
 
-1. Generate the static execution graph required for the witness generation at build time (`--features=build-witness`).
-2. Generate the witness elements at runtime from serialized graph.
-
-In the first mode, it generates the c++ version of the witness generator through circom and links itself against it. The c++ code is made accessible to rust through [`cxx`](https://github.com/dtolnay/cxx). It hooks all field functions (which are x86 assembly in the original generator), such that it can recreate the execution graph through symblic execution. The execution graph is further optimized through constant propagation and dead code elimination. The resulting graph is then serialized to a binary format. At runtime, the graph can be embedded in the binary and interpreted to generate the witness.
+1. Build a Circom circuit using `build-circuit` command. As a result, you will get a binary file of graph operations to calculate the witness for a circuit.
+2. Using the generated bin file and inputs for the circuit, generate a witness using `calc-witness` command or a library function.
 
 ## Usage
 

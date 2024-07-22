@@ -2,7 +2,6 @@ use std::{
     collections::HashMap,
     ops::{BitAnd, Shl, Shr},
 };
-use std::collections::HashSet;
 
 use crate::field::M;
 use ark_bn254::Fr;
@@ -225,58 +224,7 @@ pub fn evaluate(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256>
         out[i] = U256::try_from(values[outputs[i]].into_bigint()).unwrap();
     }
 
-    // Trace the calculation of the signal
-    // println!("output 1 signal {}", outputs[1]);
-    // trace_signal(outputs[1], nodes, &values);
-
     out
-}
-
-fn trace_signal_with_seen(i: usize, nodes: &[Node], values: &Vec<Fr>,
-                          seen: &mut HashSet<usize>) {
-
-    if seen.contains(&i) {
-        println!("at [{}]: cycle detected", i);
-        return;
-    }
-
-    seen.insert(i);
-
-    match nodes[i] {
-        Node::Input(a) => {
-            println!("at [{}]: input({}): {}", i, a, values[i].to_string());
-        },
-        Node::Constant(a) => {
-            println!("at [{}]: constant {}", i, a.to_string());
-        },
-        Node::MontConstant(a) => {
-            println!("at [{}]: montgomery constant {}", i, a.into_bigint().to_string());
-        },
-        Node::Op(op, a, b) => {
-            println!("at [{}]: operation {:?} between [{}] ({}) and [{}] ({}): {}",
-                     i, op, a, values[a].to_string(), b, values[b].to_string(),
-                     values[i].to_string());
-            trace_signal_with_seen(a, nodes, values, seen);
-            trace_signal_with_seen(b, nodes, values, seen);
-        },
-        Node::UnoOp(op, a) => {
-            println!("at [{}]: unary operation {:?} on [{}] ({}): {}",
-                     i, op, a, values[a].to_string(), values[i].to_string());
-            trace_signal_with_seen(a, nodes, values, seen);
-        },
-        Node::TresOp(op, a, b, c) => {
-            println!(
-                "at [{}]: tres operation {:?} on [{}] ({}), [{}] ({}) and [{}] ({}): {}",
-                i, op, a, values[a].to_string(), b, values[b].to_string(),
-                c, values[c].to_string(), values[i].to_string());
-            trace_signal_with_seen(a, nodes, values, seen);
-        },
-    }
-}
-
-pub fn trace_signal(i: usize, nodes: &[Node], values: &Vec<Fr>) {
-    let mut seen: HashSet<usize> = HashSet::new();
-    trace_signal_with_seen(i, &nodes, &values, &mut seen);
 }
 
 /// Constant propagation
