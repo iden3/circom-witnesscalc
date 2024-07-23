@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::env;
 use std::fs::File;
 use std::io::Write;
-use ruint::aliases::U256;
 use witness::{calc_witness, wtns_from_witness};
 
 struct Args {
@@ -29,11 +27,10 @@ fn main() {
     let args = parse_args();
 
     let inputs_data = std::fs::read(&args.inputs_file).expect("Failed to read input file");
-    let inputs: HashMap<String, Vec<U256>> = serde_json::from_slice(inputs_data.as_slice()).unwrap();
 
     let graph_data = std::fs::read(&args.graph_file).expect("Failed to read graph file");
 
-    let witness = calc_witness(&inputs, &graph_data);
+    let witness = calc_witness(&inputs_data, &graph_data).unwrap();
 
     {
         let mut f = File::create(&args.witness_file).unwrap();
@@ -42,4 +39,13 @@ fn main() {
     }
 
     println!("witness saved to {}", &args.witness_file);
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_ok() {
+        println!("OK");
+    }
+
 }
