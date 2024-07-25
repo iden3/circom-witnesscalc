@@ -26,7 +26,8 @@ fn parse_args() -> Args {
 fn main() {
     let args = parse_args();
 
-    let inputs_data = std::fs::read(&args.inputs_file).expect("Failed to read input file");
+    let inputs_data = std::fs::read_to_string(&args.inputs_file)
+        .expect("Failed to read input file");
 
     let graph_data = std::fs::read(&args.graph_file).expect("Failed to read graph file");
 

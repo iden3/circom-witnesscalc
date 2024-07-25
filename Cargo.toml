@@ -15,6 +15,9 @@ rand = "0.8.5"
 ruint = { version = "1.10.0", features = ["rand", "serde", "ark-ff-04"] }
 serde = { version = "1.0.190", features = ["derive"] }
 serde_json = "1.0.64"
+wtns-file = "0.1.5"
+lazy_static = "1.4.0"
+libc = "0.2.155"
 # circom dependencies
 compiler = { path = "../circom/compiler" }
 code_producers = { path = "../circom/code_producers" }
@@ -22,11 +25,11 @@ program_structure = { path = "../circom/program_structure" }
 parser = { path = "../circom/parser" }
 type_analysis = { path = "../circom/type_analysis" }
 constraint_generation = { path = "../circom/constraint_generation" }
-wtns-file = "0.1.5"
-lazy_static = "1.4.0"
 
 [profile.release]
 opt-level = 3
 lto = "fat"
 codegen-units = 1
-debug = true
+
+[lib]
+crate-type = ["lib", "staticlib"]

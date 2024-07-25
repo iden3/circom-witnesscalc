@@ -1,13 +1,98 @@
-#[allow(non_snake_case,dead_code)]
+#![allow(non_upper_case_globals)]
+#![allow(non_camel_case_types)]
+#![allow(non_snake_case)]
+// #[allow(dead_code)]
 mod field;
 pub mod graph;
 
 use std::collections::HashMap;
+use std::ffi::{c_void, c_char, c_int, CStr};
+use std::slice::from_raw_parts;
 use ruint::aliases::U256;
 use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
 use crate::field::M;
+
+
+include!("bindings.rs");
+
+fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
+    if !status.is_null() {
+        let bs = error_msg.as_bytes();
+        unsafe {
+            (*status).code = code;
+            (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
+            libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
+            *((*status).error_msg.offset(bs.len() as isize)) = 0;
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn gw_calc_witness(
+    inputs: *const c_char,
+    graph_data: *const c_void, graph_data_len: usize,
+    wtns_data: *mut *mut c_void, wtns_len: *mut usize,
+    status: *mut gw_status_t) -> c_int {
+
+    if inputs.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
+        return 1;
+    }
+
+    if graph_data.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data is null");
+        return 1;
+    }
+
+    if graph_data_len == 0 {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data_len is 0");
+        return 1;
+    }
+
+    let graph_data_r: &[u8];
+    unsafe {
+        graph_data_r = from_raw_parts(graph_data as *const u8, graph_data_len);
+    }
+
+
+    let inputs_str: &str;
+    unsafe {
+        let c = CStr::from_ptr(inputs);
+        match c.to_str() {
+            Ok(x) => {
+                inputs_str = x;
+            }
+            Err(e) => {
+                prepare_status(status, GW_ERROR_CODE_ERROR, format!("Failed to parse inputs: {}", e).as_str());
+                return 1;
+            }
+        }
+    }
+
+    let witness = match calc_witness(inputs_str, graph_data_r) {
+        Ok(witness) => witness,
+        Err(e) => {
+            prepare_status(status, GW_ERROR_CODE_ERROR, format!("Failed to calculate witness: {:?}", e).as_str());
+            return 1;
+        }
+    };
+
+    let witness_data = wtns_from_witness(witness);
+
+    unsafe {
+        *wtns_len = witness_data.len();
+        *wtns_data = libc::malloc(witness_data.len()) as *mut c_void;
+        libc::memcpy(*wtns_data, witness_data.as_ptr() as *const c_void, witness_data.len());
+    }
+
+    prepare_status(status, GW_ERROR_CODE_ERROR, "test error");
+
+    println!("OK");
+
+    return 0;
+}
 
 // create a wtns file bytes from witness (array of field elements)
 pub fn wtns_from_witness(witness: Vec<U256>) -> Vec<u8> {
@@ -21,9 +106,9 @@ pub fn wtns_from_witness(witness: Vec<U256>) -> Vec<u8> {
     buf
 }
 
-pub fn calc_witness(inputs: &[u8], graph_data: &[u8]) -> Result<Vec<U256>, Error> {
+pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error> {
 
-    let inputs = deserialize_inputs(inputs)?;
+    let inputs = deserialize_inputs(inputs.as_bytes())?;
 
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, HashMap<String, (usize, usize)>) =
         postcard::from_bytes(graph_data).unwrap();
