@@ -14,8 +14,8 @@ use crate::graph::Node;
 use wtns_file::FieldElement;
 use crate::field::M;
 
-
-include!("bindings.rs");
+include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+// include!("bindings.rs");
 
 fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
     if !status.is_null() {

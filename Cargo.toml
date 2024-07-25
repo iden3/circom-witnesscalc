@@ -33,3 +33,6 @@ codegen-units = 1
 
 [lib]
 crate-type = ["lib", "staticlib"]
+
+[build-dependencies]
+bindgen = "0.69.4"
