@@ -1,6 +1,7 @@
 use std::env;
 use std::fs::File;
 use std::io::Write;
+use std::time::Instant;
 use witness::{calc_witness, wtns_from_witness};
 
 struct Args {
@@ -31,11 +32,16 @@ fn main() {
 
     let graph_data = std::fs::read(&args.graph_file).expect("Failed to read graph file");
 
+    let start = Instant::now();
+
     let witness = calc_witness(&inputs_data, &graph_data).unwrap();
+    let wtns_bytes = wtns_from_witness(witness);
+
+    let duration = start.elapsed();
+    println!("Witness generated in: {:?}", duration);
 
     {
         let mut f = File::create(&args.witness_file).unwrap();
-        let wtns_bytes = wtns_from_witness(witness);
         f.write_all(&wtns_bytes).unwrap();
     }
 

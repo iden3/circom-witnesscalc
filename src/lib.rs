@@ -4,7 +4,6 @@
 // #[allow(dead_code)]
 mod field;
 pub mod graph;
-
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
 use std::slice::from_raw_parts;
