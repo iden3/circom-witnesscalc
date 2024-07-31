@@ -53,6 +53,7 @@ pub enum Operation {
 }
 
 impl Operation {
+    // TODO: rewrite to &U256 type
     pub fn eval(&self, a: U256, b: U256) -> U256 {
         use Operation::*;
         match self {
@@ -113,12 +114,14 @@ impl Operation {
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UnoOperation {
     Neg,
+    Id, // identity - just return self
 }
 
 impl UnoOperation {
     pub fn eval(&self, a: U256) -> U256 {
         match self {
             UnoOperation::Neg => if a == U256::ZERO { U256::ZERO } else { M - a },
+            UnoOperation::Id => a,
         }
     }
 
@@ -129,6 +132,7 @@ impl UnoOperation {
                 x.sub_with_borrow(&a.into_bigint());
                 Fr::from_bigint(x).unwrap()
             },
+            _ => unimplemented!("uno operator {:?} not implemented for Montgomery", self),
         }
     }
 }
@@ -448,6 +452,7 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Op(Add | Sub | Mul | Shr | Band | Div | Neq, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
             UnoOp(UnoOperation::Neg, ..) => (),
+            UnoOp(op, ..) => unimplemented!("Uno Operators Montgomery form: {:?}", op),
             TresOp(TresOperation::TernCond, ..) => (),
         }
     }
