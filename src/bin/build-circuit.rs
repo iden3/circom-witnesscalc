@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::{TemplateCode};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, ReturnType, StatusInput, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, ReturnBucket, ReturnType, StatusInput, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
@@ -370,9 +370,12 @@ lazy_static! {
         m.insert(OperatorType::Sub, Operation::Sub);
         m.insert(OperatorType::ShiftL, Operation::Shl);
         m.insert(OperatorType::ShiftR, Operation::Shr);
+        m.insert(OperatorType::GreaterEq, Operation::Geq);
         m.insert(OperatorType::Lesser, Operation::Lt);
         m.insert(OperatorType::Eq(1), Operation::Eq);
+        m.insert(OperatorType::BitOr, Operation::Bor);
         m.insert(OperatorType::BitAnd, Operation::Band);
+        m.insert(OperatorType::BitXor, Operation::Bxor);
         m.insert(OperatorType::MulAddress, Operation::Mul);
         m.insert(OperatorType::AddAddress, Operation::Add);
         m
@@ -702,7 +705,9 @@ fn process_instruction(
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
                 ReturnType::Final( ref final_data ) => {
-                    assert!(final_data.context.size >= r.ln);
+                    if let FnReturn::FnVar {idx, ln} = r {
+                        assert!(final_data.context.size >= ln);
+                    }
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
                         &final_data.dest_address_type, &final_data.dest,
@@ -829,12 +834,12 @@ fn process_instruction(
                 });
                 cmp_signal_offset += create_component_bucket.signal_offset_jump;
             }
-            println!(
-                "{}",
-                fmt_create_cmp_bucket(
-                    create_component_bucket, nodes, vars, component_signal_start,
-                    signal_node_idx, &subcomponents, io_map)
-            );
+            // println!(
+            //     "{}",
+            //     fmt_create_cmp_bucket(
+            //         create_component_bucket, nodes, vars, component_signal_start,
+            //         signal_node_idx, &subcomponents, io_map)
+            // );
             if !create_component_bucket.has_inputs {
                 for i in cmp_idx..cmp_idx + create_component_bucket.number_of_cmp {
                     run_template(
@@ -868,13 +873,22 @@ fn store_function_return_results(
                     }
                     let lvar_idx = value_from_instruction_usize(location);
 
-                    for i in 0..ret_num {
-                        let v = if let Some(v) = &fn_vars[ret.idx + i] {
-                            v
-                        } else {
-                            panic!("return value is not set {} / {}", ret.idx, i)
-                        };
-                        vars[lvar_idx + i] = Some(v.clone());
+                    match ret {
+                        FnReturn::FnVar { idx, ln } => {
+                            for i in 0..ret_num {
+                                let v = if let Some(v) = &fn_vars[idx + i] {
+                                    v
+                                } else {
+                                    panic!("return value is not set {} / {}", idx, i)
+                                };
+                                vars[lvar_idx + i] = Some(v.clone());
+                            }
+
+                        }
+                        FnReturn::Value(v) => {
+                            assert_eq!(ret_num, 1);
+                            vars[lvar_idx] = Some(v.clone());
+                        }
                     }
                 }
                 LocationRule::Mapped { .. } => { todo!() }
@@ -1108,21 +1122,36 @@ fn compute_function_expression(
     panic!("unsupported operator: {}", compute_bucket.op.to_string())
 }
 
-struct FnReturn {
-    idx: usize,
-    ln: usize,
+enum FnReturn {
+    FnVar{idx: usize, ln: usize},
+    Value(Var),
 }
 
-// calculate the idx of the return statement
-fn calc_return_idx(
-    value: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
+fn build_return(
+    return_bucket: &ReturnBucket, fn_vars: &mut Vec<Option<Var>>,
+    nodes: &mut Vec<Node>) -> FnReturn {
+
+    match *return_bucket.value {
+        Instruction::Load(ref load_bucket) => {
+            FnReturn::FnVar {
+                idx: calc_return_load_idx(load_bucket, fn_vars, nodes),
+                ln: return_bucket.with_size,
+            }
+        }
+        Instruction::Compute(ref compute_bucket) => {
+            let v = compute_function_expression(compute_bucket, fn_vars, nodes);
+            FnReturn::Value(v)
+        }
+        _ => {
+            panic!("unexpected instruction for return statement: {}", return_bucket.value.to_string());
+        }
+    }
+}
+
+fn calc_return_load_idx(
+    load_bucket: &LoadBucket, fn_vars: &mut Vec<Option<Var>>,
     nodes: &mut Vec<Node>) -> usize {
 
-    let load_bucket = if let Instruction::Load(ref load_bucket) = **value {
-        load_bucket
-    } else {
-        panic!("expected the return statement support only load instruction");
-    };
     match &load_bucket.address_type {
         AddressType::Variable => {}, // OK
         _ => {
@@ -1136,6 +1165,56 @@ fn calc_return_idx(
     };
     let idx = calc_function_expression(ip, fn_vars, nodes);
     var_to_const_usize(&idx, nodes)
+}
+
+// calculate the idx of the return statement
+fn calc_return_idx(
+    value: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
+    nodes: &mut Vec<Node>) -> usize {
+
+    match **value {
+        Instruction::Load(ref load_bucket) => {
+            match &load_bucket.address_type {
+                AddressType::Variable => {}, // OK
+                _ => {
+                    panic!("expected the return statement support only variable address type");
+                }
+            }
+            let ip = if let LocationRule::Indexed { location, .. } = &load_bucket.src {
+                location
+            } else {
+                panic!("not implemented: location rule supposed to be Indexed");
+            };
+            let idx = calc_function_expression(ip, fn_vars, nodes);
+            var_to_const_usize(&idx, nodes)
+        }
+        Instruction::Compute(ref compute_bucket) => {
+            let node = compute_function_expression(compute_bucket, fn_vars, nodes);
+            var_to_const_usize(&node, nodes)
+        }
+        _ => {
+            panic!("unexpected instruction for return statement: {}", value.to_string());
+        }
+    }
+
+    // let load_bucket = if let Instruction::Load(ref load_bucket) = **value {
+    //     load_bucket
+    // } else {
+    //     panic!("expected the return statement support only load instruction");
+    // };
+    // match &load_bucket.address_type {
+    //     AddressType::Variable => {}, // OK
+    //     _ => {
+    //         panic!("expected the return statement support only variable address type");
+    //     }
+    // }
+    // let ip = if let LocationRule::Indexed { location, .. } = &load_bucket.src {
+    //     location
+    // } else {
+    //     panic!("not implemented: location rule supposed to be Indexed");
+    // };
+    // let idx = calc_function_expression(ip, fn_vars, nodes);
+    // var_to_const_usize(&idx, nodes)
 }
 
 fn process_function_instruction(
@@ -1206,11 +1285,8 @@ fn process_function_instruction(
             None
         }
         Instruction::Return(ref return_bucket) => {
-            println!("return bucket: {}", return_bucket.to_string());
-            Some(FnReturn {
-                idx: calc_return_idx(&return_bucket.value, fn_vars, nodes),
-                ln: return_bucket.with_size,
-            })
+            // println!("return bucket: {}", return_bucket.to_string());
+            Some(build_return(return_bucket, fn_vars, nodes))
         }
         Instruction::Loop(ref loop_bucket) => {
             while check_continue_condition_function(
@@ -1246,7 +1322,9 @@ fn process_function_instruction(
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
                 ReturnType::Final( ref final_data ) => {
-                    assert!(final_data.context.size >= r.ln);
+                    if let FnReturn::FnVar {idx, ln} = r {
+                        assert!(final_data.context.size >= ln);
+                    }
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results(
                         &final_data.dest_address_type, &final_data.dest,
@@ -1576,14 +1654,18 @@ fn build_binary_op_var(
                 OperatorType::Add => a.add_mod(b.clone(), M),
                 OperatorType::Sub => a.add_mod(M - b, M),
                 OperatorType::IntDiv => Operation::Idiv.eval(a.clone(), b.clone()),
+                OperatorType::Mod => Operation::Mod.eval(a.clone(), b.clone()),
                 OperatorType::ShiftL => Operation::Shl.eval(a.clone(), b.clone()),
                 OperatorType::ShiftR => Operation::Shr.eval(a.clone(), b.clone()),
+                OperatorType::GreaterEq => Operation::Geq.eval(a.clone(), b.clone()),
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::Greater => Operation::Gt.eval(a.clone(), b.clone()),
                 OperatorType::Eq(1) => Operation::Eq.eval(a.clone(), b.clone()),
                 OperatorType::NotEq => U256::from(a != b),
                 OperatorType::BoolAnd => Operation::Land.eval(a.clone(), b.clone()),
+                OperatorType::BitOr => Operation::Bor.eval(a.clone(), b.clone()),
                 OperatorType::BitAnd => Operation::Band.eval(a.clone(), b.clone()),
+                OperatorType::BitXor => Operation::Bxor.eval(a.clone(), b.clone()),
                 OperatorType::MulAddress => a * b,
                 OperatorType::AddAddress => a + b,
                 _ => {
@@ -1601,14 +1683,18 @@ fn build_binary_op_var(
                 OperatorType::Add => Operation::Add,
                 OperatorType::Sub => Operation::Sub,
                 OperatorType::IntDiv => Operation::Idiv,
+                OperatorType::Mod => Operation::Mod,
                 OperatorType::ShiftL => Operation::Shl,
                 OperatorType::ShiftR => Operation::Shr,
+                OperatorType::GreaterEq => Operation::Geq,
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::Greater => Operation::Gt,
                 OperatorType::Eq(1) => Operation::Eq,
                 OperatorType::NotEq => Operation::Neq,
                 OperatorType::BoolAnd => Operation::Land,
+                OperatorType::BitOr => Operation::Bor,
                 OperatorType::BitAnd => Operation::Band,
+                OperatorType::BitXor => Operation::Bxor,
                 _ => {
                     todo!(
                         "operator not implemented: {}",
@@ -1646,11 +1732,13 @@ fn calc_expression(
         },
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
             OperatorType::Mul | OperatorType::Div | OperatorType::Add
-            | OperatorType::Sub | OperatorType::IntDiv | OperatorType::ShiftL
-            | OperatorType::ShiftR | OperatorType::Lesser
+            | OperatorType::Sub | OperatorType::IntDiv | OperatorType::Mod
+            | OperatorType::ShiftL | OperatorType::ShiftR
+            | OperatorType::GreaterEq | OperatorType::Lesser
             | OperatorType::Greater | OperatorType::Eq(1) | OperatorType::NotEq
-            | OperatorType::BoolAnd | OperatorType::BitAnd
-            | OperatorType::MulAddress | OperatorType::AddAddress => {
+            | OperatorType::BoolAnd | OperatorType::BitOr | OperatorType::BitAnd
+            | OperatorType::BitXor | OperatorType::MulAddress
+            | OperatorType::AddAddress => {
                 build_binary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
                     signal_node_idx, subcomponents, io_map)

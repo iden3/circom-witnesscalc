@@ -2,7 +2,8 @@ use std::{
     collections::HashMap,
     ops::{BitAnd, Shl, Shr},
 };
-
+use std::cmp::Ordering;
+use std::ops::{BitOr, BitXor};
 use crate::field::M;
 use ark_bn254::Fr;
 use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One};
@@ -34,9 +35,12 @@ where
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Operation {
     Mul,
-    MMul,
+    Div,
     Add,
     Sub,
+    Idiv,
+    Mod,
+    MMul,
     Eq,
     Neq,
     Lt,
@@ -47,9 +51,9 @@ pub enum Operation {
     Lor,
     Shl,
     Shr,
+    Bor,
     Band,
-    Div,
-    Idiv,
+    Bxor,
 }
 
 impl Operation {
@@ -57,20 +61,7 @@ impl Operation {
     pub fn eval(&self, a: U256, b: U256) -> U256 {
         use Operation::*;
         match self {
-            Add => a.add_mod(b, M),
-            Sub => a.add_mod(M - b, M),
             Mul => a.mul_mod(b, M),
-            Eq => U256::from(a == b),
-            Neq => U256::from(a != b),
-            Lt => U256::from(a < b),
-            Gt => U256::from(a > b),
-            Leq => U256::from(a <= b),
-            Geq => U256::from(a >= b),
-            Land => U256::from(a != U256::ZERO && b != U256::ZERO),
-            Lor => U256::from(a != U256::ZERO || b != U256::ZERO),
-            Shl => compute_shl_uint(a, b),
-            Shr => compute_shr_uint(a, b),
-            Band => a.bitand(b),
             Div => {
                 if b == U256::ZERO {
                     // as we are simulating a circuit execution with signals
@@ -81,6 +72,26 @@ impl Operation {
                     a.mul_mod(b.inv_mod(M).unwrap(), M)
                 }
             },
+            Add => a.add_mod(b, M),
+            Sub => a.add_mod(M - b, M),
+            Mod => a.div_rem(b).1,
+            Eq => U256::from(a == b),
+            Neq => U256::from(a != b),
+            Lt => U256::from(a < b),
+            Gt => U256::from(a > b),
+            Leq => U256::from(a <= b),
+            Geq => U256::from(a >= b),
+            Land => U256::from(a != U256::ZERO && b != U256::ZERO),
+            Lor => U256::from(a != U256::ZERO || b != U256::ZERO),
+            Shl => compute_shl_uint(a, b),
+            Shr => compute_shr_uint(a, b),
+            // TODO test with conner case when it is possible to get the number
+            //      bigger then modulus
+            Bor => a.bitor(b),
+            Band => a.bitand(b),
+            // TODO test with conner case when it is possible to get the number
+            //      bigger then modulus
+            Bxor => a.bitxor(b),
             Idiv => a / b,
             // TODO implement other operators
             _ => unimplemented!("operator {:?} not implemented", self),
@@ -94,7 +105,11 @@ impl Operation {
             Sub => a - b,
             Mul => a * b,
             Shr => shr(a, b),
+            Shl => shl(a, b),
+            Bor => bit_or(a, b),
             Band => bit_and(a, b),
+            Bxor => bit_xor(a, b),
+
             Div => if b.is_zero() { Fr::zero() } else { a / b },
             // We always should return something on the circuit execution.
             // So in case of division by 0 we would return 0. And the proof
@@ -449,7 +464,7 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Constant(c) => *node = MontConstant(Fr::new((*c).into())),
             MontConstant(..) => (),
             Input(..) => (),
-            Op(Add | Sub | Mul | Shr | Band | Div | Neq, ..) => (),
+            Op(Add | Sub | Mul | Shr | Bor | Band | Bxor | Div | Shl | Neq, ..) => (),
             Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
             UnoOp(UnoOperation::Neg, ..) => (),
             UnoOp(op, ..) => unimplemented!("Uno Operators Montgomery form: {:?}", op),
@@ -459,14 +474,30 @@ pub fn montgomery_form(nodes: &mut [Node]) {
     eprintln!("Converted to Montgomery form");
 }
 
+fn shl(a: Fr, b: Fr) -> Fr {
+    if b.is_zero() {
+        return a;
+    }
+
+    if b.cmp(&Fr::from(Fr::MODULUS_BIT_SIZE)).is_ge() {
+        return Fr::zero();
+    }
+
+    let n = b.into_bigint().0[0] as u32;
+
+    let mut a = a.into_bigint();
+    a.muln(n);
+    return Fr::from_bigint(a).unwrap();
+}
+
 fn shr(a: Fr, b: Fr) -> Fr {
     if b.is_zero() {
         return a;
     }
 
     match b.cmp(&Fr::from(254u64)) {
-        std::cmp::Ordering::Equal  => {return Fr::zero()},
-        std::cmp::Ordering::Greater => {return Fr::zero()},
+        Ordering::Equal  => {return Fr::zero()},
+        Ordering::Greater => {return Fr::zero()},
         _ => (),
     };
 
@@ -509,4 +540,70 @@ fn bit_and(a: Fr, b: Fr) -> Fr {
     }
 
     Fr::from_bigint(d).unwrap()
+}
+
+fn bit_or(a: Fr, b: Fr) -> Fr {
+    let a = a.into_bigint();
+    let b = b.into_bigint();
+    let mut c: [u64; 4] = [0; 4];
+    for i in 0..4 {
+        c[i] = a.0[i] | b.0[i];
+    }
+    let mut d: BigInt<4> = BigInt::new(c);
+    if d > Fr::MODULUS {
+        d.sub_with_borrow(&Fr::MODULUS);
+    }
+
+    Fr::from_bigint(d).unwrap()
+}
+
+fn bit_xor(a: Fr, b: Fr) -> Fr {
+    let a = a.into_bigint();
+    let b = b.into_bigint();
+    let mut c: [u64; 4] = [0; 4];
+    for i in 0..4 {
+        c[i] = a.0[i] ^ b.0[i];
+    }
+    let mut d: BigInt<4> = BigInt::new(c);
+    if d > Fr::MODULUS {
+        d.sub_with_borrow(&Fr::MODULUS);
+    }
+
+    Fr::from_bigint(d).unwrap()
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn test_ok() {
+        let a= Fr::from(4u64);
+        let b= Fr::from(2u64);
+        let c = shl(a, b);
+        assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
+    }
+
+    #[test]
+    fn test_greater_then_module() {
+        // println!("{}", Fr::MODULUS);
+        // let f = Fr::from_str("21888242871839275222246405745257275088548364400416034343698204186575808495619").unwrap();
+        // println!("[2] {}", f);
+        // let mut i = f.into_bigint();
+        // println!("[3] {}", i);
+        // let j = i.add_with_carry(&Fr::MODULUS);
+        // println!("[4] {}", i);
+        // println!("[5] {}", j);
+        // if i.cmp(&Fr::MODULUS).is_ge() {
+        //     i.sub_with_borrow(&Fr::MODULUS);
+        // }
+        // let f2 = Fr::from_bigint(i).unwrap();
+        // println!("[6] {}", f2);
+        // let a= Fr::from(4u64);
+        // let b= Fr::from(2u64);
+        // let c = shl(a, b);
+        // assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
+    }
 }
