@@ -176,7 +176,7 @@ impl From<ParseError> for Error {
     }
 }
 
-fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
+pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
     let v: serde_json::Value = serde_json::from_slice(inputs_data).unwrap();
 
     let map = if let serde_json::Value::Object(map) = v {

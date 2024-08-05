@@ -1,0 +1,6 @@
+[submodule "circomlib"]
+	path = circomlib
+	url = git@github.com:iden3/circomlib.git
+[submodule "circuits"]
+	path = circuits
+	url = git@github.com:iden3/circuits.git
