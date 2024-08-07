@@ -6,10 +6,8 @@ This crate provides a fast witness generator for Circom circuits, serving as a d
 
 `circom-witness-rs` comes with two modes:
 
-1. Generate the static execution graph required for the witness generation at build time (`--features=build-witness`).
-2. Generate the witness elements at runtime from serialized graph.
-
-In the first mode, it generates the c++ version of the witness generator through circom and links itself against it. The c++ code is made accessible to rust through [`cxx`](https://github.com/dtolnay/cxx). It hooks all field functions (which are x86 assembly in the original generator), such that it can recreate the execution graph through symblic execution. The execution graph is further optimized through constant propagation and dead code elimination. The resulting graph is then serialized to a binary format. At runtime, the graph can be embedded in the binary and interpreted to generate the witness.
+1. Build a Circom circuit using `build-circuit` command. As a result, you will get a binary file of graph operations to calculate the witness for a circuit.
+2. Using the generated bin file and inputs for the circuit, generate a witness using `calc-witness` command or a library function.
 
 ## Usage
 
@@ -45,3 +43,53 @@ As a nice side effect of the graph optimizations, the binary size is also reduce
 
 There are still quite a few missing operations that need to be implemented. The list of supported and unsupported operations can be found here. Support for the missing operations is very straighfoward and will be added in the future.
 https://github.com/philsippl/circom-witness-rs/blob/e889cedde49a8929812b825aede55d9668118302/src/generate.rs#L61-L89
+
+## Build witness from intermediate representation
+
+To create a circuit graph file from a Circom 2 program, run the following command:
+
+```shell
+cargo run --package witness --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
+```
+
+Optional flags:
+
+* `-l <path_to_circom_libs/>` - Path to the circomlib directory. This flag can be used multiple times.
+* `-i <inputs_file.json>` - Path to the inputs file. If provided, the inputs will be used to generate the witness. Otherwise, inputs will be set to 0.
+* `-print-unoptimized` - Evaluate the graph with provided or default inputs and print it to stdout (useful for debugging).
+
+## Calculate witness from circuit graph created on previous step
+
+> Note: In the inputs file all values of signals should be arrays. Even if they have a single value.
+
+To generate a witness file from a circuit graph and inputs, run the following command.
+
+```shell
+cargo run --package witness --bin calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
+```
+
+## Run circuits tests
+
+To run circuits tests, we need to make some manual setup
+
+```shell
+# Update the git submodules to checkout all required dependencies
+git submodule update --init --recursive
+# Install dependencies for iden3 authV2 circuits
+pushd test_deps/iden3-circuits-authV2
+npm install
+popd
+# Install dependencies for master branch of iden3 circuits
+pushd test_deps/iden3-circuits-master
+npm install
+popd
+```
+
+Also, you need to have the following commands installed: `circom`, `snarkjs`,
+`curl`, `cargo`, `node` and `cmp`.
+
+Now run the `test_circuits.sh` script.
+
+```shell
+./test_circuits.sh
+```

@@ -1,42 +1,26 @@
-use std::{env, fs, path::Path, process::Command};
+use std::env;
+use std::path::PathBuf;
 
 fn main() {
-    if cfg!(feature = "build-witness") {
-        let witness_cpp = env::var("WITNESS_CPP").unwrap();
-        let circuit_file = Path::new(&witness_cpp);
-        let circuit_name = circuit_file.file_stem().unwrap().to_str().unwrap();
+    // The bindgen::Builder is the main entry point
+    // to bindgen, and lets you build up options for
+    // the resulting bindings.
+    let bindings = bindgen::Builder::default()
+        // The input header we would like to generate
+        // bindings for.
+        .header("include/graph_witness.h")
+        .allowlist_type("gw_status_t")
+        // Tell cargo to invalidate the built crate whenever any of the
+        // included header files changed.
+        .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
+        // Finish the builder and generate the bindings.
+        .generate()
+        // Unwrap the Result and panic on failure.
+        .expect("Unable to generate bindings");
 
-        let status = Command::new("circom")
-            .args([
-                fs::canonicalize(circuit_file).unwrap().to_str().unwrap(),
-                "--c",
-            ])
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        let cpp = Path::new("./")
-            .join(circuit_name.to_owned() + "_cpp")
-            .join(circuit_name.to_owned() + ".cpp");
-
-        println!("cargo:warning=\"{}\"", cpp.to_str().unwrap());
-
-        let status = Command::new("./script/replace.sh")
-            .arg(cpp.to_str().unwrap())
-            .status()
-            .unwrap();
-        assert!(status.success());
-
-        cxx_build::bridge("src/generate.rs")
-            .file("src/circuit.cc")
-            .flag_if_supported("-std=c++14")
-            .flag_if_supported("-w")
-            .flag_if_supported("-d")
-            .flag_if_supported("-g")
-            .compile("witness");
-
-        println!("cargo:rerun-if-changed=src/main.rs");
-        println!("cargo:rerun-if-changed=src/circuit.cc");
-        println!("cargo:rerun-if-changed=include/circuit.h");
-    }
+    // Write the bindings to the $OUT_DIR/bindings.rs file.
+    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    bindings
+        .write_to_file(out_path.join("bindings.rs"))
+        .expect("Couldn't write bindings!");
 }
