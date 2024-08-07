@@ -4,3 +4,6 @@
 [submodule "circuits"]
 	path = circuits
 	url = git@github.com:iden3/circuits.git
+[submodule "test_deps/iden3-circuits-authV2"]
+	path = test_deps/iden3-circuits-authV2
+	url = git@github.com:iden3/circuits.git
