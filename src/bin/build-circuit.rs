@@ -29,6 +29,7 @@ fn try_signal_store<'a>(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Option<(usize, &'a InstructionPointer)> {
     let store_bucket = match **inst {
         Instruction::Store(ref store_bucket) => store_bucket,
@@ -45,7 +46,7 @@ fn try_signal_store<'a>(
             }
             let signal_idx = calc_expression(
                 location, nodes, vars, component_signal_start,
-                signal_node_idx, subcomponents, io_map);
+                signal_node_idx, subcomponents, io_map, print_debug);
             let signal_idx = if let Var::Value(ref c) = signal_idx {
                 bigint_to_usize(c)
             } else {
@@ -105,6 +106,7 @@ fn operator_argument_instruction_n(
     subcomponents: &Vec<Option<ComponentInstance>>,
     size: usize,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Vec<usize> {
     assert!(size > 0, "size = {}", size);
 
@@ -113,7 +115,7 @@ fn operator_argument_instruction_n(
         // this function, so we can use it here is size == 1
         return vec![operator_argument_instruction(
             inst, nodes, signal_node_idx, vars,
-            component_signal_start, subcomponents, io_map)];
+            component_signal_start, subcomponents, io_map, print_debug)];
     }
 
     match **inst {
@@ -129,7 +131,7 @@ fn operator_argument_instruction_n(
                         }
                         let signal_idx = calc_expression(
                             location, nodes, vars, component_signal_start,
-                            signal_node_idx, subcomponents, io_map);
+                            signal_node_idx, subcomponents, io_map, print_debug);
                         let signal_idx = if let Var::Value(c) = signal_idx {
                             bigint_to_usize(&c)
                         } else {
@@ -153,7 +155,7 @@ fn operator_argument_instruction_n(
                 AddressType::SubcmpSignal { ref cmp_address, .. } => {
                     let subcomponent_idx = calc_expression(
                         cmp_address, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents, io_map);
+                        signal_node_idx, subcomponents, io_map, print_debug);
                     let subcomponent_idx = if let Var::Value(ref c) = subcomponent_idx {
                         bigint_to_usize(c)
                     } else {
@@ -167,7 +169,8 @@ fn operator_argument_instruction_n(
                         } => {
                             let signal_idx = calc_expression(
                                 location, nodes, vars, component_signal_start,
-                                signal_node_idx, subcomponents, io_map);
+                                signal_node_idx, subcomponents, io_map,
+                                print_debug);
                             if let Var::Value(ref c) = signal_idx {
                                 (bigint_to_usize(c), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
                             } else {
@@ -178,21 +181,25 @@ fn operator_argument_instruction_n(
                             calc_mapped_signal_idx(
                                 subcomponents, subcomponent_idx, io_map,
                                 signal_code.clone(), indexes, nodes, vars,
-                                component_signal_start, signal_node_idx)
+                                component_signal_start, signal_node_idx,
+                                print_debug)
                         }
                     };
                     let signal_offset = subcomponents[subcomponent_idx]
                         .as_ref()
                         .unwrap()
                         .signal_offset;
-                    let location_rule = match load_bucket.src {
-                        LocationRule::Indexed { .. } => "Indexed",
-                        LocationRule::Mapped { .. } => "Mapped",
-                    };
-                    println!(
-                        "Load subcomponent signal (location: {}, template: {}, subcomponent idx: {}, size: {}): {} + {} = {}",
-                        location_rule, template_header, subcomponent_idx, size,
-                        signal_offset, signal_idx, signal_offset + signal_idx);
+
+                    if print_debug {
+                        let location_rule = match load_bucket.src {
+                            LocationRule::Indexed { .. } => "Indexed",
+                            LocationRule::Mapped { .. } => "Mapped",
+                        };
+                        println!(
+                            "Load subcomponent signal (location: {}, template: {}, subcomponent idx: {}, size: {}): {} + {} = {}",
+                            location_rule, template_header, subcomponent_idx, size,
+                            signal_offset, signal_idx, signal_offset + signal_idx);
+                    }
 
                     let signal_idx = signal_offset + signal_idx;
 
@@ -227,6 +234,7 @@ fn operator_argument_instruction(
     component_signal_start: usize,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> usize {
     match **inst {
         Instruction::Load(ref load_bucket) => {
@@ -241,7 +249,8 @@ fn operator_argument_instruction(
                         }
                         let signal_idx = calc_expression(
                             location, nodes, vars, component_signal_start,
-                            signal_node_idx, subcomponents, io_map);
+                            signal_node_idx, subcomponents, io_map,
+                            print_debug);
                         let signal_idx = if let Var::Value(c) = signal_idx {
                             bigint_to_usize(&c)
                         } else {
@@ -261,7 +270,7 @@ fn operator_argument_instruction(
                 } => {
                     let subcomponent_idx = calc_expression(
                         cmp_address, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents, io_map);
+                        signal_node_idx, subcomponents, io_map, print_debug);
                     let subcomponent_idx = if let Var::Value(ref c) = subcomponent_idx {
                         bigint_to_usize(c)
                     } else {
@@ -275,7 +284,8 @@ fn operator_argument_instruction(
                         } => {
                             let signal_idx = calc_expression(
                                 location, nodes, vars, component_signal_start,
-                                signal_node_idx, subcomponents, io_map);
+                                signal_node_idx, subcomponents, io_map,
+                                print_debug);
                             if let Var::Value(ref c) = signal_idx {
                                 (bigint_to_usize(c), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
                             } else {
@@ -286,23 +296,22 @@ fn operator_argument_instruction(
                             calc_mapped_signal_idx(
                                 subcomponents, subcomponent_idx, io_map,
                                 signal_code.clone(), indexes, nodes, vars,
-                                component_signal_start, signal_node_idx)
+                                component_signal_start, signal_node_idx,
+                                print_debug)
                         }
                     };
-                    let signal_offset = subcomponents[subcomponent_idx]
-                        .as_ref()
-                        .unwrap()
-                        .signal_offset;
-                    println!(
-                        "Load subcomponent signal: ({}) [{}] {} + {} = {}",
-                        template_header, subcomponent_idx, signal_offset,
-                        signal_idx, signal_offset + signal_idx);
 
-                    let signal_idx = subcomponents[subcomponent_idx]
-                        .as_ref()
-                        .unwrap()
-                        .signal_offset
-                        + signal_idx;
+                    let signal_offset = subcomponents[subcomponent_idx]
+                        .as_ref().unwrap().signal_offset;
+
+                    if print_debug {
+                        println!(
+                            "Load subcomponent signal: ({}) [{}] {} + {} = {}",
+                            template_header, subcomponent_idx, signal_offset,
+                            signal_idx, signal_offset + signal_idx);
+                    }
+
+                    let signal_idx = signal_offset + signal_idx;
                     let signal_node = signal_node_idx[signal_idx];
                     assert_ne!(signal_node, usize::MAX, "signal is not set yet");
                     return signal_node;
@@ -312,7 +321,8 @@ fn operator_argument_instruction(
                         LocationRule::Indexed { ref location, .. } => {
                             let var_idx = calc_expression(
                                 location, nodes, vars, component_signal_start,
-                                signal_node_idx, subcomponents, io_map);
+                                signal_node_idx, subcomponents, io_map,
+                                print_debug);
                             let var_idx = if let Var::Value(c) = var_idx {
                                 bigint_to_usize(&c)
                             } else {
@@ -337,7 +347,7 @@ fn operator_argument_instruction(
         Instruction::Compute(ref compute_bucket) => {
             let node = node_from_compute_bucket(
                 compute_bucket, nodes, signal_node_idx, vars,
-                component_signal_start, subcomponents, io_map);
+                component_signal_start, subcomponents, io_map, print_debug);
             nodes.push(node);
             return nodes.len() - 1;
         }
@@ -399,6 +409,7 @@ fn node_from_compute_bucket(
     component_signal_start: usize,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Node {
     if let Some(op) = DUO_OPERATORS_MAP.get(&compute_bucket.op) {
         let arg1 = operator_argument_instruction(
@@ -409,6 +420,7 @@ fn node_from_compute_bucket(
             component_signal_start,
             subcomponents,
             io_map,
+            print_debug,
         );
         let arg2 = operator_argument_instruction(
             &compute_bucket.stack[1],
@@ -418,6 +430,7 @@ fn node_from_compute_bucket(
             component_signal_start,
             subcomponents,
             io_map,
+            print_debug,
         );
         return Node::Op(op.clone(), arg1, arg2);
     }
@@ -430,6 +443,7 @@ fn node_from_compute_bucket(
             component_signal_start,
             subcomponents,
             io_map,
+            print_debug,
         );
         return Node::UnoOp(op.clone(), arg1);
     }
@@ -445,7 +459,7 @@ fn calc_mapped_signal_idx(
     nodes: &mut Vec<Node>,
     vars: &mut Vec<Option<Var>>,
     component_signal_start: usize,
-    signal_node_idx: &mut Vec<usize>) -> (usize, String) {
+    signal_node_idx: &mut Vec<usize>, print_debug: bool) -> (usize, String) {
 
     let template_id = &subcomponents[subcomponent_idx].as_ref().unwrap().template_id;
     let signals = io_map.get(template_id).unwrap();
@@ -460,7 +474,7 @@ fn calc_mapped_signal_idx(
         let map_index = calc_expression(
             &indexes[0], nodes, vars,
             component_signal_start, signal_node_idx,
-            subcomponents, io_map);
+            subcomponents, io_map, print_debug);
         let map_index = if let Var::Value(ref c) = map_index {
             bigint_to_usize(c)
         } else {
@@ -483,6 +497,7 @@ fn process_instruction(
     functions: &Vec<FunctionCode>,
     component_signal_start: usize,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) {
     match **inst {
         Instruction::Value(..) => {
@@ -504,25 +519,26 @@ fn process_instruction(
                             }
                             let signal_idx = calc_expression(
                                 location, nodes, vars, component_signal_start,
-                                signal_node_idx, subcomponents, io_map);
+                                signal_node_idx, subcomponents, io_map,
+                                print_debug);
                             let signal_idx = if let Var::Value(ref c) = signal_idx {
                                 bigint_to_usize(c)
                             } else {
                                 panic!("signal index is not a constant")
                             };
 
-                            // println!(
-                            //     "Store signal at offset {} + {} = {}",
-                            //     component_signal_start,
-                            //     signal_idx,
-                            //     component_signal_start + signal_idx
-                            // );
+                            if print_debug {
+                                println!(
+                                    "Store signal at offset {} + {} = {}",
+                                    component_signal_start, signal_idx,
+                                    component_signal_start + signal_idx);
+                            }
                             let signal_idx = component_signal_start + signal_idx;
 
                             let node_idxs = operator_argument_instruction_n(
                                 &store_bucket.src, nodes, signal_node_idx, vars,
                                 component_signal_start, subcomponents,
-                                store_bucket.context.size, io_map);
+                                store_bucket.context.size, io_map, print_debug);
 
                             assert_eq!(node_idxs.len(), store_bucket.context.size);
 
@@ -558,7 +574,7 @@ fn process_instruction(
                             vars[lvar_idx] = Some(calc_expression(
                                 &store_bucket.src, nodes, vars,
                                 component_signal_start, signal_node_idx,
-                                subcomponents, io_map));
+                                subcomponents, io_map, print_debug));
                         }
                         _ => {
                             panic!(
@@ -576,14 +592,15 @@ fn process_instruction(
                     let node_idxs = operator_argument_instruction_n(
                         &store_bucket.src, nodes, signal_node_idx, vars,
                         component_signal_start, subcomponents,
-                        store_bucket.context.size, io_map);
+                        store_bucket.context.size, io_map, print_debug);
                     assert_eq!(node_idxs.len(), store_bucket.context.size);
 
                     store_subcomponent_signals(
                         cmp_address, input_information, nodes, vars,
                         component_signal_start, signal_node_idx, subcomponents,
                         io_map, &node_idxs, &store_bucket.dest,
-                        store_bucket.context.size, templates, functions);
+                        store_bucket.context.size, templates, functions,
+                        print_debug);
                 }
             };
         }
@@ -599,11 +616,7 @@ fn process_instruction(
                 let args = calc_expression_n(
                     inst2, nodes, vars, component_signal_start, signal_node_idx,
                     subcomponents, call_bucket.argument_types[idx].size,
-                    io_map);
-                println!(
-                    "args #{} has len {}",
-                    idx, call_bucket.argument_types[idx].size);
-
+                    io_map, print_debug);
                 for arg in args {
                     fn_vars[count] = Some(arg);
                     count += 1;
@@ -612,7 +625,7 @@ fn process_instruction(
             }
 
             let r = run_function(
-                call_bucket, functions, &mut fn_vars, nodes);
+                call_bucket, functions, &mut fn_vars, nodes, print_debug);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -624,14 +637,15 @@ fn process_instruction(
                     store_function_return_results(
                         final_data, &fn_vars, &r, vars, nodes,
                         component_signal_start, signal_node_idx,
-                        subcomponents, io_map, templates, functions);
+                        subcomponents, io_map, templates, functions,
+                        print_debug);
                 }
             }
         }
         Instruction::Branch(ref branch_bucket) => {
             let cond = calc_expression(
                 &branch_bucket.cond, nodes, vars, component_signal_start,
-                signal_node_idx, subcomponents, io_map);
+                signal_node_idx, subcomponents, io_map, print_debug);
             match cond {
                 Var::Value(cond_val) => {
                     let inst_list = if cond_val == U256::ZERO {
@@ -643,7 +657,7 @@ fn process_instruction(
                         process_instruction(
                             inst, nodes, signal_node_idx, vars, subcomponents,
                             templates, functions, component_signal_start,
-                            io_map);
+                            io_map, print_debug);
                     }
                 }
                 Var::Node(node_idx) => {
@@ -655,11 +669,11 @@ fn process_instruction(
                     let if_branch = try_signal_store(
                         &branch_bucket.if_branch[0], nodes, vars,
                         component_signal_start, signal_node_idx, subcomponents,
-                        io_map);
+                        io_map, print_debug);
                     let else_branch = try_signal_store(
                         &branch_bucket.else_branch[0], nodes, vars,
                         component_signal_start, signal_node_idx, subcomponents,
-                        io_map);
+                        io_map, print_debug);
                     match (if_branch, else_branch) {
                         (Some((if_signal_idx, if_src)), Some((else_signal_idx, else_src))) => {
                             if if_signal_idx != else_signal_idx {
@@ -668,11 +682,13 @@ fn process_instruction(
 
                             let node_idx_if = operator_argument_instruction(
                                 if_src, nodes, signal_node_idx, vars,
-                                component_signal_start, subcomponents, io_map);
+                                component_signal_start, subcomponents, io_map,
+                                print_debug);
 
                             let node_idx_else = operator_argument_instruction(
                                 else_src, nodes, signal_node_idx, vars,
-                                component_signal_start, subcomponents, io_map);
+                                component_signal_start, subcomponents, io_map,
+                                print_debug);
 
                             let node = Node::TresOp(TresOperation::TernCond, node_idx, node_idx_if, node_idx_else);
                             nodes.push(node);
@@ -707,18 +723,20 @@ fn process_instruction(
             while check_continue_condition(
                 &loop_bucket.continue_condition, nodes, vars,
                 component_signal_start, signal_node_idx, subcomponents,
-                io_map) {
+                io_map, print_debug) {
                 for i in &loop_bucket.body {
                     process_instruction(
                         i, nodes, signal_node_idx, vars, subcomponents,
-                        templates, functions, component_signal_start, io_map);
+                        templates, functions, component_signal_start, io_map,
+                        print_debug);
                 }
             }
         }
         Instruction::CreateCmp(ref create_component_bucket) => {
             let sub_cmp_id = calc_expression(
                 &create_component_bucket.sub_cmp_id, nodes, vars,
-                component_signal_start, signal_node_idx, subcomponents, io_map);
+                component_signal_start, signal_node_idx, subcomponents, io_map,
+                print_debug);
 
             let cmp_idx = if let Var::Value(ref c) = sub_cmp_id {
                 bigint_to_usize(c)
@@ -747,12 +765,14 @@ fn process_instruction(
                 });
                 cmp_signal_offset += create_component_bucket.signal_offset_jump;
             }
-            // println!(
-            //     "{}",
-            //     fmt_create_cmp_bucket(
-            //         create_component_bucket, nodes, vars, component_signal_start,
-            //         signal_node_idx, &subcomponents, io_map)
-            // );
+            if print_debug {
+                println!(
+                    "{}",
+                    fmt_create_cmp_bucket(
+                        create_component_bucket, nodes, vars,
+                        component_signal_start, signal_node_idx, &subcomponents,
+                        io_map, print_debug));
+            }
             if !create_component_bucket.has_inputs {
                 for i in cmp_idx..cmp_idx + create_component_bucket.number_of_cmp {
                     run_template(
@@ -760,7 +780,7 @@ fn process_instruction(
                         subcomponents[i].as_ref().unwrap().template_id, nodes,
                         signal_node_idx,
                         subcomponents[i].as_ref().unwrap().signal_offset,
-                        io_map)
+                        io_map, print_debug)
                 }
             }
         }
@@ -811,7 +831,7 @@ fn store_function_return_results_into_subsignal(
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, templates: &Vec<TemplateCode>,
-    functions: &Vec<FunctionCode>) {
+    functions: &Vec<FunctionCode>, print_debug: bool) {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -855,7 +875,7 @@ fn store_function_return_results_into_subsignal(
     store_subcomponent_signals(
         cmp_address, input_information, nodes, dst_vars, component_signal_start,
         signal_node_idx, subcomponents, io_map, &src_node_idxs, &final_data.dest,
-        final_data.context.size, templates, functions);
+        final_data.context.size, templates, functions, print_debug);
 }
 
 fn store_function_return_results(
@@ -864,7 +884,7 @@ fn store_function_return_results(
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, templates: &Vec<TemplateCode>,
-    functions: &Vec<FunctionCode>) {
+    functions: &Vec<FunctionCode>, print_debug: bool) {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
@@ -876,25 +896,29 @@ fn store_function_return_results(
             return store_function_return_results_into_subsignal(
                 final_data, src_vars, ret, dst_vars, nodes,
                 component_signal_start, signal_node_idx, subcomponents,
-                io_map, templates, functions);
+                io_map, templates, functions, print_debug);
         }
     }
 }
 
 fn run_function(
     call_bucket: &CallBucket, functions: &Vec<FunctionCode>,
-    fn_vars: &mut Vec<Option<Var>>, nodes: &mut Vec<Node>) -> FnReturn {
+    fn_vars: &mut Vec<Option<Var>>, nodes: &mut Vec<Node>,
+    print_debug: bool) -> FnReturn {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
     // }
 
     let f = find_function(&call_bucket.symbol, functions);
-    println!("Run function {}", &call_bucket.symbol);
+    if print_debug {
+        println!("Run function {}", &call_bucket.symbol);
+    }
 
     let mut r: Option<FnReturn> = None;
     for i in &f.body {
-        r = process_function_instruction(i, fn_vars, nodes, functions);
+        r = process_function_instruction(
+            i, fn_vars, nodes, functions, print_debug);
         if r.is_some() {
             break;
         }
@@ -902,7 +926,9 @@ fn run_function(
     // println!("{}", f.to_string());
 
     let r = r.expect("no return found");
-    println!("Function {} returned", &call_bucket.symbol);
+    if print_debug {
+        println!("Function {} returned", &call_bucket.symbol);
+    }
     r
 }
 fn calc_function_expression_n(
@@ -1157,7 +1183,8 @@ fn calc_return_load_idx(
 
 fn process_function_instruction(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Vec<Node>, functions: &Vec<FunctionCode>) -> Option<FnReturn> {
+    nodes: &mut Vec<Node>, functions: &Vec<FunctionCode>,
+    print_debug: bool) -> Option<FnReturn> {
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
@@ -1206,7 +1233,7 @@ fn process_function_instruction(
             if var_to_const_int(&cond, nodes).gt(&U256::ZERO) {
                 for i in &branch_bucket.if_branch {
                     let r = process_function_instruction(
-                        i, fn_vars, nodes, functions);
+                        i, fn_vars, nodes, functions, print_debug);
                     if r.is_some() {
                         return r;
                     }
@@ -1214,7 +1241,7 @@ fn process_function_instruction(
             } else {
                 for i in &branch_bucket.else_branch {
                     let r = process_function_instruction(
-                        i, fn_vars, nodes, functions);
+                        i, fn_vars, nodes, functions, print_debug);
                     if r.is_some() {
                         return r;
                     }
@@ -1230,7 +1257,8 @@ fn process_function_instruction(
             while check_continue_condition_function(
                 &loop_bucket.continue_condition, fn_vars, nodes) {
                 for i in &loop_bucket.body {
-                    process_function_instruction(i, fn_vars, nodes, functions);
+                    process_function_instruction(i, fn_vars, nodes, functions,
+                    print_debug);
                 }
             };
             None
@@ -1243,10 +1271,6 @@ fn process_function_instruction(
             for inst2 in &call_bucket.arguments {
                 let args = calc_function_expression_n(
                     inst2, fn_vars, nodes, call_bucket.argument_types[idx].size);
-                println!(
-                    "args #{} has len {}",
-                    idx, call_bucket.argument_types[idx].size);
-
                 for arg in args {
                     new_fn_vars[count] = Some(arg);
                     count += 1;
@@ -1255,7 +1279,7 @@ fn process_function_instruction(
             }
 
             let r = run_function(
-                call_bucket, functions, &mut new_fn_vars, nodes);
+                call_bucket, functions, &mut new_fn_vars, nodes, print_debug);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -1311,7 +1335,6 @@ struct ComponentInstance {
     number_of_inputs: usize,
 }
 
-#[allow(dead_code)] // this function may be used for debugging
 fn fmt_create_cmp_bucket(
     cmp_bucket: &CreateCmpBucket,
     nodes: &mut Vec<Node>,
@@ -1320,10 +1343,11 @@ fn fmt_create_cmp_bucket(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> String {
     let sub_cmp_id = calc_expression(
         &cmp_bucket.sub_cmp_id, nodes, vars, component_signal_start,
-        signal_node_idx, subcomponents, io_map);
+        signal_node_idx, subcomponents, io_map, print_debug);
 
     let sub_cmp_id = match sub_cmp_id {
         Var::Value(ref c) => format!("Constant {}", c.to_string()),
@@ -1382,7 +1406,7 @@ fn load_n(
     vars: &mut Vec<Option<Var>>, component_signal_start: usize,
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>, size: usize,
-    io_map: &TemplateInstanceIOMap) -> Vec<Var> {
+    io_map: &TemplateInstanceIOMap, print_debug: bool) -> Vec<Var> {
 
     match load_bucket.address_type {
         AddressType::Signal => match &load_bucket.src {
@@ -1395,7 +1419,7 @@ fn load_n(
                 }
                 let signal_idx = calc_expression(
                     location, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents, io_map);
+                    signal_node_idx, subcomponents, io_map, print_debug);
                 let signal_idx = if let Var::Value(c) = signal_idx {
                     bigint_to_usize(&c)
                 } else {
@@ -1422,7 +1446,7 @@ fn load_n(
         } => {
             let subcomponent_idx = calc_expression(
                 cmp_address, nodes, vars, component_signal_start,
-                signal_node_idx, subcomponents, io_map);
+                signal_node_idx, subcomponents, io_map, print_debug);
             let subcomponent_idx = if let Var::Value(c) = subcomponent_idx {
                 bigint_to_usize(&c)
             } else {
@@ -1436,7 +1460,7 @@ fn load_n(
                 } => {
                     let signal_idx = calc_expression(
                         location, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents, io_map);
+                        signal_node_idx, subcomponents, io_map, print_debug);
                     if let Var::Value(c) = signal_idx {
                         (bigint_to_usize(&c), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
                     } else {
@@ -1447,19 +1471,22 @@ fn load_n(
                     calc_mapped_signal_idx(
                         subcomponents, subcomponent_idx, io_map,
                         signal_code.clone(), indexes, nodes, vars,
-                        component_signal_start, signal_node_idx)
+                        component_signal_start, signal_node_idx, print_debug)
                 }
             };
             let signal_offset = subcomponents[subcomponent_idx]
                 .as_ref().unwrap().signal_offset;
-            let location_rule = match load_bucket.src {
-                LocationRule::Indexed { .. } => "Indexed",
-                LocationRule::Mapped { .. } => "Mapped",
-            };
-            println!(
-                "Load subcomponent signal (location: {}, template: {}, subcomponent idx: {}, size: {}): {} + {} = {}",
-                location_rule, template_header, subcomponent_idx, size,
-                signal_offset, signal_idx, signal_offset + signal_idx);
+
+            if print_debug {
+                let location_rule = match load_bucket.src {
+                    LocationRule::Indexed { .. } => "Indexed",
+                    LocationRule::Mapped { .. } => "Mapped",
+                };
+                println!(
+                    "Load subcomponent signal (location: {}, template: {}, subcomponent idx: {}, size: {}): {} + {} = {}",
+                    location_rule, template_header, subcomponent_idx, size,
+                    signal_offset, signal_idx, signal_offset + signal_idx);
+            }
 
             let signal_idx = signal_offset + signal_idx;
             let mut result = Vec::with_capacity(size);
@@ -1485,7 +1512,7 @@ fn load_n(
                     }
                     let var_idx = calc_expression(
                         location, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents, io_map);
+                        signal_node_idx, subcomponents, io_map, print_debug);
                     let var_idx = if let Var::Value(c) = var_idx {
                         bigint_to_usize(&c)
                     } else {
@@ -1516,11 +1543,12 @@ fn build_unary_op_var(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Var {
     assert_eq!(compute_bucket.stack.len(), 1);
     let a = calc_expression(
         &compute_bucket.stack[0], nodes, vars, component_signal_start,
-        signal_node_idx, subcomponents, io_map);
+        signal_node_idx, subcomponents, io_map, print_debug);
 
     match &a {
         Var::Value(ref a) => {
@@ -1561,13 +1589,15 @@ fn build_binary_op_var(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Var {
     assert_eq!(compute_bucket.stack.len(), 2);
     let a = calc_expression(
         &compute_bucket.stack[0], nodes, vars, component_signal_start,
-        signal_node_idx, subcomponents, io_map);
-    let b = calc_expression(&compute_bucket.stack[1], nodes, vars,
-        component_signal_start, signal_node_idx, subcomponents, io_map);
+        signal_node_idx, subcomponents, io_map, print_debug);
+    let b = calc_expression(
+        &compute_bucket.stack[1], nodes, vars, component_signal_start,
+        signal_node_idx, subcomponents, io_map, print_debug);
 
     let mut node_idx = |v: &Var| match v {
         Var::Value(ref c) => {
@@ -1656,6 +1686,7 @@ fn calc_expression(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Var {
     match **inst {
         Instruction::Value(ref value_bucket) => {
@@ -1664,7 +1695,7 @@ fn calc_expression(
         Instruction::Load(ref load_bucket) => {
             let r = load_n(
                 load_bucket, nodes, vars, component_signal_start, signal_node_idx,
-                subcomponents, 1, io_map);
+                subcomponents, 1, io_map, print_debug);
             assert_eq!(r.len(), 1);
             r[0].clone()
         },
@@ -1679,12 +1710,12 @@ fn calc_expression(
             | OperatorType::AddAddress => {
                 build_binary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents, io_map)
+                    signal_node_idx, subcomponents, io_map, print_debug)
             }
             OperatorType::ToAddress | OperatorType::PrefixSub => {
                 build_unary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
-                    signal_node_idx, subcomponents, io_map)
+                    signal_node_idx, subcomponents, io_map, print_debug)
             }
             _ => {
                 todo!(
@@ -1713,18 +1744,19 @@ fn calc_expression_n(
     subcomponents: &Vec<Option<ComponentInstance>>,
     size: usize,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> Vec<Var> {
     if size == 1 {
         return vec![calc_expression(
             inst, nodes, vars, component_signal_start, signal_node_idx,
-            subcomponents, io_map)]
+            subcomponents, io_map, print_debug)]
     }
 
     match **inst {
         Instruction::Load(ref load_bucket) => {
             return load_n(
                 load_bucket, nodes, vars, component_signal_start, signal_node_idx,
-                subcomponents, size, io_map);
+                subcomponents, size, io_map, print_debug);
         },
         _ => {
             panic!(
@@ -1743,10 +1775,11 @@ fn check_continue_condition(
     signal_node_idx: &mut Vec<usize>,
     subcomponents: &Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) -> bool {
     let val = calc_expression(
         inst, nodes, vars, component_signal_start, signal_node_idx,
-        subcomponents, io_map);
+        subcomponents, io_map, print_debug);
     match val {
         Var::Value(c) => c != U256::ZERO,
         _ => {
@@ -1830,15 +1863,15 @@ fn run_template(
     signal_node_idx: &mut Vec<usize>,
     component_signal_start: usize,
     io_map: &TemplateInstanceIOMap,
+    print_debug: bool,
 ) {
     let tmpl = &templates[template_id];
 
-    println!(
-        "Run template #{}: {}, body length: {}",
-        tmpl.id,
-        tmpl.name,
-        tmpl.body.len()
-    );
+    if print_debug {
+        println!(
+            "Run template #{}: {}, body length: {}", tmpl.id, tmpl.name,
+            tmpl.body.len());
+    }
 
     let mut vars: Vec<Option<Var>> = vec![None; tmpl.var_stack_depth];
     let mut components: Vec<Option<ComponentInstance>> = vec![];
@@ -1849,7 +1882,7 @@ fn run_template(
     for inst in &tmpl.body {
         process_instruction(
             &inst, nodes, signal_node_idx, &mut vars, &mut components,
-            templates, functions, component_signal_start, io_map);
+            templates, functions, component_signal_start, io_map, print_debug);
     }
     // TODO: assert all components run
 }
@@ -1860,6 +1893,7 @@ struct Args {
     graph_file: String,
     link_libraries: Vec<PathBuf>,
     print_unoptimized: bool,
+    print_debug: bool,
 }
 
 fn parse_args() -> Args {
@@ -1870,6 +1904,7 @@ fn parse_args() -> Args {
     let mut link_libraries: Vec<PathBuf> = Vec::new();
     let mut inputs_file: Option<String> = None;
     let mut print_unoptimized = false;
+    let mut print_debug = false;
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
@@ -1911,6 +1946,8 @@ fn parse_args() -> Args {
             circuit_file = Some(args[i].clone());
         } else if let None = graph_file {
             graph_file = Some(args[i].clone());
+        } else if args[i] == "-v" {
+            print_debug = true;
         } else {
             usage(format!("unexpected argument: {}", args[i]).as_str());
         }
@@ -1923,6 +1960,7 @@ fn parse_args() -> Args {
         graph_file: graph_file.unwrap_or_else(|| { usage("missing graph file") }),
         link_libraries,
         print_unoptimized,
+        print_debug,
     }
 }
 
@@ -2022,7 +2060,7 @@ fn main() {
     run_template(
         &circuit.templates, &circuit.functions, main_template_id, &mut nodes,
         &mut signal_node_idx, main_component_signal_start,
-        circuit.c_producer.get_io_map());
+        circuit.c_producer.get_io_map(), args.print_debug);
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
         assert_ne!(i.clone(), usize::MAX, "signal #{} is not set", idx);
@@ -2111,7 +2149,8 @@ fn store_subcomponent_signals(
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, src_node_idxs: &Vec<usize>, dest: &LocationRule,
-    size: usize, templates: &Vec<TemplateCode>, functions: &Vec<FunctionCode>) {
+    size: usize, templates: &Vec<TemplateCode>, functions: &Vec<FunctionCode>,
+    print_debug: bool) {
 
     let input_status: &StatusInput;
     if let InputInformation::Input { ref status } = input_information {
@@ -2122,7 +2161,7 @@ fn store_subcomponent_signals(
 
     let subcomponent_idx = calc_expression(
         cmp_address, nodes, tmpl_vars, component_signal_start,
-        signal_node_idx, subcomponents, io_map);
+        signal_node_idx, subcomponents, io_map, print_debug);
     let subcomponent_idx = var_to_const_usize(&subcomponent_idx, nodes);
 
     let (signal_idx, template_header) = match dest {
@@ -2132,7 +2171,7 @@ fn store_subcomponent_signals(
         } => {
             let signal_idx = calc_expression(
                 location, nodes, tmpl_vars, component_signal_start,
-                signal_node_idx, subcomponents, io_map);
+                signal_node_idx, subcomponents, io_map, print_debug);
             if let Var::Value(ref c) = signal_idx {
                 (bigint_to_usize(c), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
             } else {
@@ -2143,22 +2182,24 @@ fn store_subcomponent_signals(
             calc_mapped_signal_idx(
                 subcomponents, subcomponent_idx, io_map,
                 signal_code.clone(), indexes, nodes, tmpl_vars,
-                component_signal_start, signal_node_idx)
+                component_signal_start, signal_node_idx, print_debug)
         }
     };
 
     let signal_offset = subcomponents[subcomponent_idx]
-        .as_ref()
-        .unwrap()
-        .signal_offset;
-    let location = match dest {
-        LocationRule::Indexed { .. } => "Indexed",
-        LocationRule::Mapped { .. } => "Mapped",
-    };
-    println!(
-        "Store subcomponent signal (location: {}, template: {}, subcomponent idx: {}, num: {}): {} + {} = {}",
-        location, template_header, subcomponent_idx, size, signal_offset,
-        signal_idx, signal_offset + signal_idx);
+        .as_ref().unwrap().signal_offset;
+
+    if print_debug {
+        let location = match dest {
+            LocationRule::Indexed { .. } => "Indexed",
+            LocationRule::Mapped { .. } => "Mapped",
+        };
+        println!(
+            "Store subcomponent signal (location: {}, template: {}, subcomponent idx: {}, num: {}): {} + {} = {}",
+            location, template_header, subcomponent_idx, size, signal_offset,
+            signal_idx, signal_offset + signal_idx);
+    }
+
     let signal_idx = signal_offset + signal_idx;
     for i in 0..size {
         if signal_node_idx[signal_idx + i] != usize::MAX {
@@ -2198,6 +2239,7 @@ fn store_subcomponent_signals(
                 .unwrap()
                 .signal_offset,
             io_map,
+            print_debug,
         )
     }
 }

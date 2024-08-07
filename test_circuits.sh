@@ -52,6 +52,7 @@ function test_circuit() {
 	local witness_path="${workdir}/${circuit_name}.wtns"
 	local proof_path="${workdir}/${circuit_name}_proof.json"
 	local public_signals_path="${workdir}/${circuit_name}_public.json"
+	local r1cs_path="${workdir}/${circuit_name}.r1cs"
 	
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
@@ -63,27 +64,35 @@ function test_circuit() {
 	pushd "$workdir" > /dev/null
 	
 	circom -l "${circomlib_path}" --r1cs --wasm "$circuit_path"
+	local r1cs_md5=$(openssl dgst -hex -md5 "${r1cs_path}" | awk '{print $2}')
+	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"
+	local vk_path="${workdir}/${circuit_name}_${r1cs_md5}_verification_key.json"
+
 	node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
 	snarkjs wej "${witness_path}" "${witness_path}.json"
 	snarkjs wej "${witness_path}2" "${witness_path}2.json"
 	
-	snarkjs wtns check "${circuit_name}".r1cs "${witness_path}"
-	snarkjs wtns check "${circuit_name}".r1cs "${witness_path}2"
+	snarkjs wtns check "${r1cs_path}" "${witness_path}"
+	snarkjs wtns check "${r1cs_path}" "${witness_path}2"
 	if ! cmp -s "${witness_path}" "${witness_path}2"; then
 		echo -e "${RED}Witnesses do not match${NC}"
 		exit 1
 	fi
-	
-	snarkjs groth16 setup "${circuit_name}".r1cs "$ptau_path" "${circuit_name}"_0000.zkey
-	local ENTROPY1=$(head -c 64 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
-	snarkjs zkey contribute "${circuit_name}"_0000.zkey "${circuit_name}"_final.zkey --name="1st Contribution" -v -e="$ENTROPY1"
-	snarkjs zkey verify "${circuit_name}".r1cs "$ptau_path" "${circuit_name}"_final.zkey
-	snarkjs zkey export verificationkey "${circuit_name}"_final.zkey "${circuit_name}"_verification_key.json
+
+    if [ ! -f "$zkey_path" ]; then
+		snarkjs groth16 setup "${r1cs_path}" "$ptau_path" "${circuit_name}"_"${r1cs_md5}"_0000.zkey
+		local ENTROPY1=$(head -c 64 /dev/urandom | od -An -tx1 -v | tr -d ' \n')
+		snarkjs zkey contribute "${circuit_name}"_"${r1cs_md5}"_0000.zkey "${zkey_path}" --name="1st Contribution" -v -e="$ENTROPY1"
+		snarkjs zkey verify "${r1cs_path}" "$ptau_path" "${zkey_path}"
+	fi
+	if [ ! -f "$vk_path" ]; then
+		snarkjs zkey export verificationkey "${zkey_path}" "${vk_path}"
+	fi
 	# export witness as text ints
 	# snarkjs wej witness.wtns witness.json
 	
-	snarkjs groth16 prove "${circuit_name}"_final.zkey "${witness_path}" "${proof_path}" "${public_signals_path}"
-	snarkjs groth16 verify "${circuit_name}"_verification_key.json "${public_signals_path}" "${proof_path}"
+	snarkjs groth16 prove "${zkey_path}" "${witness_path}" "${proof_path}" "${public_signals_path}"
+	snarkjs groth16 verify "${vk_path}" "${public_signals_path}" "${proof_path}"
 	
 	popd > /dev/null
 }

@@ -70,12 +70,21 @@ cargo run --package witness --bin calc-witness <path_to_circuit_graph.bin> <path
 
 ## Run circuits tests
 
-To run circuits tests, first get the iden3/circomlib repository
+To run circuits tests, we need to make some manual setup
 
 ```shell
-git clone git@github.com:iden3/circomlib.git
+# Update the git submodules to checkout all required dependencies
+git submodule update --init --recursive
+# Install dependencies for iden3 authV2 circuits
+pushd test_deps/iden3-circuits-authV2
+npm install
+popd
+# Install dependencies for master branch of iden3 circuits
+pushd test_deps/iden3-circuits-master
+npm install
+popd
 ```
-circom snarkjs curl cargo node cmp
+
 Also, you need to have the following commands installed: `circom`, `snarkjs`,
 `curl`, `cargo`, `node` and `cmp`.
 
