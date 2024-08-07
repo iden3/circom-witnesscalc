@@ -32,7 +32,7 @@ fi
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 echo "script dir ${script_dir}"
 
-circomlib_path="${script_dir}/circomlib/circuits"
+circomlib_path="${script_dir}/test_deps/circomlib/circuits"
 if [ ! -d "$circomlib_path" ]; then
 	echo -e "${RED}circomlib not found at $circomlib_path${NC}"
 	exit 1
