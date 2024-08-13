@@ -107,6 +107,7 @@ fn operator_argument_instruction_n(
     size: usize,
     io_map: &TemplateInstanceIOMap,
     print_debug: bool,
+    call_stack: &Vec<String>,
 ) -> Vec<usize> {
     assert!(size > 0, "size = {}", size);
 
@@ -212,10 +213,35 @@ fn operator_argument_instruction_n(
                             component_signal_start, signal_idx, i);
                         result.push(signal_node);
                     }
-                    return result;
+                    result
                 }
                 AddressType::Variable => {
-                    panic!("multi-index load is not implemented for Variable");
+                    let location = match load_bucket.src {
+                        LocationRule::Indexed { ref location, .. } => location,
+                        LocationRule::Mapped { .. } => {
+                            panic!("mapped signals are supported on for subcmp signals");
+                        }
+                    };
+                    let var_idx = calc_expression(
+                        location, nodes, vars, component_signal_start,
+                        signal_node_idx, subcomponents, io_map,
+                        print_debug);
+                    let var_idx = var_to_const_usize(&var_idx, nodes);
+                    let mut result = Vec::with_capacity(size);
+                    for i in 0..size {
+                        match vars[var_idx+i] {
+                            Some(Var::Node(idx)) => {
+                                result.push(idx);
+                            },
+                            Some(Var::Value(ref v)) => {
+                                nodes.push(Node::Constant(v.clone()));
+                                result.push(nodes.len() - 1);
+                            }
+                            None => { panic!("variable is not set: {}, {:?}",
+                                             load_bucket.line, call_stack); }
+                        };
+                    }
+                    result
                 }
             }
         }
@@ -498,6 +524,7 @@ fn process_instruction(
     component_signal_start: usize,
     io_map: &TemplateInstanceIOMap,
     print_debug: bool,
+    call_stack: &Vec<String>,
 ) {
     match **inst {
         Instruction::Value(..) => {
@@ -538,7 +565,8 @@ fn process_instruction(
                             let node_idxs = operator_argument_instruction_n(
                                 &store_bucket.src, nodes, signal_node_idx, vars,
                                 component_signal_start, subcomponents,
-                                store_bucket.context.size, io_map, print_debug);
+                                store_bucket.context.size, io_map, print_debug,
+                                call_stack);
 
                             assert_eq!(node_idxs.len(), store_bucket.context.size);
 
@@ -559,9 +587,6 @@ fn process_instruction(
                     }
                 }
                 AddressType::Variable => {
-                    // TODO we panic if uncomment this line. Why?
-                    //      On test circuit5 on calculation of Poseidon.
-                    // assert_eq!(store_bucket.context.size, 1, "size = {}", store_bucket.context.size);
                     match &store_bucket.dest {
                         LocationRule::Indexed {
                             location,
@@ -571,16 +596,17 @@ fn process_instruction(
                                 panic!("not implemented: template_header expected to be None");
                             }
                             let lvar_idx = value_from_instruction_usize(location);
-                            vars[lvar_idx] = Some(calc_expression(
+                            let var_exprs = calc_expression_n(
                                 &store_bucket.src, nodes, vars,
                                 component_signal_start, signal_node_idx,
-                                subcomponents, io_map, print_debug));
+                                subcomponents, store_bucket.context.size,
+                                io_map, print_debug);
+                            for i in 0..store_bucket.context.size {
+                                vars[lvar_idx + i] = Some(var_exprs[i].clone());
+                            }
                         }
-                        _ => {
-                            panic!(
-                                "not implemented: variable destination: {}",
-                                store_bucket.dest.to_string()
-                            );
+                        LocationRule::Mapped {..} => {
+                            panic!("mapped location is not supported for AddressType::Variable");
                         }
                     }
                 }
@@ -592,7 +618,8 @@ fn process_instruction(
                     let node_idxs = operator_argument_instruction_n(
                         &store_bucket.src, nodes, signal_node_idx, vars,
                         component_signal_start, subcomponents,
-                        store_bucket.context.size, io_map, print_debug);
+                        store_bucket.context.size, io_map, print_debug,
+                        call_stack);
                     assert_eq!(node_idxs.len(), store_bucket.context.size);
 
                     store_subcomponent_signals(
@@ -600,7 +627,7 @@ fn process_instruction(
                         component_signal_start, signal_node_idx, subcomponents,
                         io_map, &node_idxs, &store_bucket.dest,
                         store_bucket.context.size, templates, functions,
-                        print_debug);
+                        print_debug, call_stack);
                 }
             };
         }
@@ -625,7 +652,8 @@ fn process_instruction(
             }
 
             let r = run_function(
-                call_bucket, functions, &mut fn_vars, nodes, print_debug);
+                call_bucket, functions, &mut fn_vars, nodes, print_debug,
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -638,7 +666,7 @@ fn process_instruction(
                         final_data, &fn_vars, &r, vars, nodes,
                         component_signal_start, signal_node_idx,
                         subcomponents, io_map, templates, functions,
-                        print_debug);
+                        print_debug, call_stack);
                 }
             }
         }
@@ -657,7 +685,7 @@ fn process_instruction(
                         process_instruction(
                             inst, nodes, signal_node_idx, vars, subcomponents,
                             templates, functions, component_signal_start,
-                            io_map, print_debug);
+                            io_map, print_debug, call_stack);
                     }
                 }
                 Var::Node(node_idx) => {
@@ -728,7 +756,7 @@ fn process_instruction(
                     process_instruction(
                         i, nodes, signal_node_idx, vars, subcomponents,
                         templates, functions, component_signal_start, io_map,
-                        print_debug);
+                        print_debug, call_stack);
                 }
             }
         }
@@ -780,7 +808,7 @@ fn process_instruction(
                         subcomponents[i].as_ref().unwrap().template_id, nodes,
                         signal_node_idx,
                         subcomponents[i].as_ref().unwrap().signal_offset,
-                        io_map, print_debug)
+                        io_map, print_debug, call_stack)
                 }
             }
         }
@@ -831,7 +859,8 @@ fn store_function_return_results_into_subsignal(
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, templates: &Vec<TemplateCode>,
-    functions: &Vec<FunctionCode>, print_debug: bool) {
+    functions: &Vec<FunctionCode>, print_debug: bool,
+    call_stack: &Vec<String>) {
 
     let (cmp_address, input_information) = if let AddressType::SubcmpSignal {cmp_address, input_information, ..} = &final_data.dest_address_type {
         (cmp_address, input_information)
@@ -875,7 +904,7 @@ fn store_function_return_results_into_subsignal(
     store_subcomponent_signals(
         cmp_address, input_information, nodes, dst_vars, component_signal_start,
         signal_node_idx, subcomponents, io_map, &src_node_idxs, &final_data.dest,
-        final_data.context.size, templates, functions, print_debug);
+        final_data.context.size, templates, functions, print_debug, call_stack);
 }
 
 fn store_function_return_results(
@@ -884,7 +913,8 @@ fn store_function_return_results(
     component_signal_start: usize, signal_node_idx: &mut Vec<usize>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, templates: &Vec<TemplateCode>,
-    functions: &Vec<FunctionCode>, print_debug: bool) {
+    functions: &Vec<FunctionCode>, print_debug: bool,
+    call_stack: &Vec<String>) {
 
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
@@ -896,7 +926,7 @@ fn store_function_return_results(
             return store_function_return_results_into_subsignal(
                 final_data, src_vars, ret, dst_vars, nodes,
                 component_signal_start, signal_node_idx, subcomponents,
-                io_map, templates, functions, print_debug);
+                io_map, templates, functions, print_debug, call_stack);
         }
     }
 }
@@ -904,7 +934,7 @@ fn store_function_return_results(
 fn run_function(
     call_bucket: &CallBucket, functions: &Vec<FunctionCode>,
     fn_vars: &mut Vec<Option<Var>>, nodes: &mut Vec<Node>,
-    print_debug: bool) -> FnReturn {
+    print_debug: bool, call_stack: &Vec<String>) -> FnReturn {
 
     // for i in functions {
     //     println!("Function: {} {}", i.header, i.name);
@@ -915,10 +945,13 @@ fn run_function(
         println!("Run function {}", &call_bucket.symbol);
     }
 
+    let mut call_stack = call_stack.clone();
+    call_stack.push(f.name.clone());
+
     let mut r: Option<FnReturn> = None;
     for i in &f.body {
         r = process_function_instruction(
-            i, fn_vars, nodes, functions, print_debug);
+            i, fn_vars, nodes, functions, print_debug, &call_stack);
         if r.is_some() {
             break;
         }
@@ -1184,7 +1217,7 @@ fn calc_return_load_idx(
 fn process_function_instruction(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
     nodes: &mut Vec<Node>, functions: &Vec<FunctionCode>,
-    print_debug: bool) -> Option<FnReturn> {
+    print_debug: bool, call_stack: &Vec<String>) -> Option<FnReturn> {
 
     match **inst {
         Instruction::Store(ref store_bucket) => {
@@ -1233,7 +1266,7 @@ fn process_function_instruction(
             if var_to_const_int(&cond, nodes).gt(&U256::ZERO) {
                 for i in &branch_bucket.if_branch {
                     let r = process_function_instruction(
-                        i, fn_vars, nodes, functions, print_debug);
+                        i, fn_vars, nodes, functions, print_debug, call_stack);
                     if r.is_some() {
                         return r;
                     }
@@ -1241,7 +1274,7 @@ fn process_function_instruction(
             } else {
                 for i in &branch_bucket.else_branch {
                     let r = process_function_instruction(
-                        i, fn_vars, nodes, functions, print_debug);
+                        i, fn_vars, nodes, functions, print_debug, call_stack);
                     if r.is_some() {
                         return r;
                     }
@@ -1257,8 +1290,8 @@ fn process_function_instruction(
             while check_continue_condition_function(
                 &loop_bucket.continue_condition, fn_vars, nodes) {
                 for i in &loop_bucket.body {
-                    process_function_instruction(i, fn_vars, nodes, functions,
-                    print_debug);
+                    process_function_instruction(
+                        i, fn_vars, nodes, functions, print_debug, call_stack);
                 }
             };
             None
@@ -1279,7 +1312,8 @@ fn process_function_instruction(
             }
 
             let r = run_function(
-                call_bucket, functions, &mut new_fn_vars, nodes, print_debug);
+                call_bucket, functions, &mut new_fn_vars, nodes, print_debug,
+                call_stack);
 
             match call_bucket.return_info {
                 ReturnType::Intermediate{ ..} => { todo!(); }
@@ -1501,36 +1535,27 @@ fn load_n(
             return result;
         }
         AddressType::Variable => {
-            assert_eq!(size, 1, "size = {}", size);
-            match load_bucket.src {
-                LocationRule::Indexed {
-                    ref location,
-                    ref template_header,
-                } => {
-                    if template_header.is_some() {
-                        panic!("not implemented: template_header expected to be None");
-                    }
-                    let var_idx = calc_expression(
-                        location, nodes, vars, component_signal_start,
-                        signal_node_idx, subcomponents, io_map, print_debug);
-                    let var_idx = if let Var::Value(c) = var_idx {
-                        bigint_to_usize(&c)
-                    } else {
-                        panic!("variable index is not a constant");
-                    };
+            let location = if let LocationRule::Indexed { location, template_header } = &load_bucket.src {
+                if template_header.is_some() {
+                    panic!("template_header expected to be None");
+                }
+                location
+            } else {
+                panic!("location rule supposed to be Indexed for AddressType::Variable");
+            };
+            let var_idx = calc_expression(
+                location, nodes, vars, component_signal_start, signal_node_idx,
+                subcomponents, io_map, print_debug);
+            let var_idx = var_to_const_usize(&var_idx, nodes);
 
-                    match vars[var_idx] {
-                        Some(ref v) => {
-                            let v = vec![v.clone()];
-                            return v
-                        },
-                        None => panic!("variable is not set yet"),
-                    }
-                }
-                LocationRule::Mapped { .. } => {
-                    todo!()
-                }
+            let mut result: Vec<Var> = Vec::with_capacity(size);
+            for i in 0..size {
+                result.push(match vars[var_idx + i] {
+                    Some(ref v) => v.clone(),
+                    None => panic!("variable is not set yet"),
+                });
             }
+            result
         },
     }
 }
@@ -1864,12 +1889,17 @@ fn run_template(
     component_signal_start: usize,
     io_map: &TemplateInstanceIOMap,
     print_debug: bool,
+    call_stack: &Vec<String>,
 ) {
     let tmpl = &templates[template_id];
 
+    let tmpl_name: String = format!("{}_{}", tmpl.name, tmpl.id);
+    let mut call_stack = call_stack.clone();
+    call_stack.push(tmpl_name.clone());
+
     if print_debug {
         println!(
-            "Run template #{}: {}, body length: {}", tmpl.id, tmpl.name,
+            "Run template {}_{}: body length: {}", tmpl.name, tmpl.id,
             tmpl.body.len());
     }
 
@@ -1882,7 +1912,12 @@ fn run_template(
     for inst in &tmpl.body {
         process_instruction(
             &inst, nodes, signal_node_idx, &mut vars, &mut components,
-            templates, functions, component_signal_start, io_map, print_debug);
+            templates, functions, component_signal_start, io_map, print_debug,
+            &call_stack);
+    }
+
+    if print_debug {
+        println!("Template {}_{} finished", tmpl.name, tmpl.id);
     }
     // TODO: assert all components run
 }
@@ -1939,6 +1974,8 @@ fn parse_args() -> Args {
             }
         } else if args[i] == "-print-unoptimized" {
             print_unoptimized = true;
+        } else if args[i] == "-v" {
+            print_debug = true;
         } else if args[i].starts_with("-") {
             let message = format!("unknown argument: {}", args[i]);
             usage(&message);
@@ -1946,8 +1983,6 @@ fn parse_args() -> Args {
             circuit_file = Some(args[i].clone());
         } else if let None = graph_file {
             graph_file = Some(args[i].clone());
-        } else if args[i] == "-v" {
-            print_debug = true;
         } else {
             usage(format!("unexpected argument: {}", args[i]).as_str());
         }
@@ -2060,7 +2095,7 @@ fn main() {
     run_template(
         &circuit.templates, &circuit.functions, main_template_id, &mut nodes,
         &mut signal_node_idx, main_component_signal_start,
-        circuit.c_producer.get_io_map(), args.print_debug);
+        circuit.c_producer.get_io_map(), args.print_debug, &vec![]);
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
         assert_ne!(i.clone(), usize::MAX, "signal #{} is not set", idx);
@@ -2150,7 +2185,7 @@ fn store_subcomponent_signals(
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     io_map: &TemplateInstanceIOMap, src_node_idxs: &Vec<usize>, dest: &LocationRule,
     size: usize, templates: &Vec<TemplateCode>, functions: &Vec<FunctionCode>,
-    print_debug: bool) {
+    print_debug: bool, call_stack: &Vec<String>) {
 
     let input_status: &StatusInput;
     if let InputInformation::Input { ref status } = input_information {
@@ -2240,6 +2275,7 @@ fn store_subcomponent_signals(
                 .signal_offset,
             io_map,
             print_debug,
+            call_stack,
         )
     }
 }
