@@ -294,6 +294,9 @@ fn operator_argument_instruction(
                         cmp_address, nodes, vars, component_signal_start,
                         signal_node_idx, subcomponents, io_map, print_debug,
                         call_stack);
+                    // if call_stack.last().unwrap() == "BigLessThan_279" {
+                    //     println!("subcomponent_idx: {}", subcomponent_idx.to_string());
+                    // }
                     let subcomponent_idx = var_to_const_usize(
                         &subcomponent_idx, nodes, call_stack);
 
@@ -398,6 +401,9 @@ lazy_static! {
         m.insert(OperatorType::Div, Operation::Div);
         m.insert(OperatorType::Add, Operation::Add);
         m.insert(OperatorType::Sub, Operation::Sub);
+        m.insert(OperatorType::Pow, Operation::Pow);
+        m.insert(OperatorType::IntDiv, Operation::Idiv);
+        m.insert(OperatorType::Mod, Operation::Mod);
         m.insert(OperatorType::ShiftL, Operation::Shl);
         m.insert(OperatorType::ShiftR, Operation::Shr);
         m.insert(OperatorType::GreaterEq, Operation::Geq);
@@ -1305,8 +1311,14 @@ fn process_function_instruction(
             };
             None
         }
+        Instruction::Assert(_) => {
+            // asserts are not supported in witness graph
+            None
+        }
         _ => {
-            panic!("not implemented: {}", inst.to_string());
+            panic!(
+                "not implemented: {}; {}",
+                inst.to_string(), call_stack.join(" -> "));
         }
     }
 }
@@ -1628,6 +1640,7 @@ fn build_binary_op_var(
                 },
                 OperatorType::Add => a.add_mod(b.clone(), M),
                 OperatorType::Sub => a.add_mod(M - b, M),
+                OperatorType::Pow => Operation::Pow.eval(a.clone(), b.clone()),
                 OperatorType::IntDiv => Operation::Idiv.eval(a.clone(), b.clone()),
                 OperatorType::Mod => Operation::Mod.eval(a.clone(), b.clone()),
                 OperatorType::ShiftL => Operation::Shl.eval(a.clone(), b.clone()),
@@ -1657,6 +1670,7 @@ fn build_binary_op_var(
                 OperatorType::Div => Operation::Div,
                 OperatorType::Add => Operation::Add,
                 OperatorType::Sub => Operation::Sub,
+                OperatorType::Pow => Operation::Pow,
                 OperatorType::IntDiv => Operation::Idiv,
                 OperatorType::Mod => Operation::Mod,
                 OperatorType::ShiftL => Operation::Shl,
@@ -1709,8 +1723,8 @@ fn calc_expression(
         },
         Instruction::Compute(ref compute_bucket) => match compute_bucket.op {
             OperatorType::Mul | OperatorType::Div | OperatorType::Add
-            | OperatorType::Sub | OperatorType::IntDiv | OperatorType::Mod
-            | OperatorType::ShiftL | OperatorType::ShiftR
+            | OperatorType::Sub | OperatorType::Pow | OperatorType::IntDiv
+            | OperatorType::Mod | OperatorType::ShiftL | OperatorType::ShiftR
             | OperatorType::GreaterEq | OperatorType::Lesser
             | OperatorType::Greater | OperatorType::Eq(1) | OperatorType::NotEq
             | OperatorType::BoolAnd | OperatorType::BitOr | OperatorType::BitAnd
@@ -2077,6 +2091,9 @@ fn main() {
     // assert that template id is equal to index in templates list
     for (i, t) in circuit.templates.iter().enumerate() {
         assert_eq!(i, t.id);
+        if args.print_debug {
+            println!("Template #{}: {}", i, t.name);
+        }
     }
 
     let main_component_signal_start = 1usize;

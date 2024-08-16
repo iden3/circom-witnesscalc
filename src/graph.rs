@@ -12,6 +12,7 @@ use ruint::aliases::U256;
 use serde::{Deserialize, Serialize};
 
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize, Compress, Validate};
+use ruint::uint;
 
 fn ark_se<S, A: CanonicalSerialize>(a: &A, s: S) -> Result<S::Ok, S::Error>
 where
@@ -38,6 +39,7 @@ pub enum Operation {
     Div,
     Add,
     Sub,
+    Pow,
     Idiv,
     Mod,
     MMul,
@@ -74,13 +76,14 @@ impl Operation {
             },
             Add => a.add_mod(b, M),
             Sub => a.add_mod(M - b, M),
+            Pow => a.pow_mod(b, M),
             Mod => a.div_rem(b).1,
             Eq => U256::from(a == b),
             Neq => U256::from(a != b),
-            Lt => U256::from(a < b),
-            Gt => U256::from(a > b),
-            Leq => U256::from(a <= b),
-            Geq => U256::from(a >= b),
+            Lt => u_lt(&a, &b),
+            Gt => u_gt(&a, &b),
+            Leq => u_lte(&a, &b),
+            Geq => u_gte(&a, &b),
             Land => U256::from(a != U256::ZERO && b != U256::ZERO),
             Lor => U256::from(a != U256::ZERO || b != U256::ZERO),
             Shl => compute_shl_uint(a, b),
@@ -572,11 +575,64 @@ fn bit_xor(a: Fr, b: Fr) -> Fr {
     Fr::from_bigint(d).unwrap()
 }
 
+// M / 2
+const halfM: U256 = uint!(10944121435919637611123202872628637544274182200208017171849102093287904247808_U256);
+
+
+fn u_gte(a: &U256, b: &U256) -> U256 {
+    let a_neg = &halfM < a;
+    let b_neg = &halfM < b;
+
+    match (a_neg, b_neg) {
+        (false, false) => U256::from(a >= b),
+        (true, false) => uint!(0_U256),
+        (false, true) => uint!(1_U256),
+        (true, true) => U256::from(a >= b),
+    }
+}
+
+fn u_lte(a: &U256, b: &U256) -> U256 {
+    let a_neg = &halfM < a;
+    let b_neg = &halfM < b;
+
+    match (a_neg, b_neg) {
+        (false, false) => U256::from(a <= b),
+        (true, false) => uint!(1_U256),
+        (false, true) => uint!(0_U256),
+        (true, true) => U256::from(a <= b),
+    }
+}
+
+fn u_gt(a: &U256, b: &U256) -> U256 {
+    let a_neg = &halfM < a;
+    let b_neg = &halfM < b;
+
+    match (a_neg, b_neg) {
+        (false, false) => U256::from(a > b),
+        (true, false) => uint!(0_U256),
+        (false, true) => uint!(1_U256),
+        (true, true) => U256::from(a > b),
+    }
+}
+
+fn u_lt(a: &U256, b: &U256) -> U256 {
+    let a_neg = &halfM < a;
+    let b_neg = &halfM < b;
+
+    match (a_neg, b_neg) {
+        (false, false) => U256::from(a < b),
+        (true, false) => uint!(1_U256),
+        (false, true) => uint!(0_U256),
+        (true, true) => U256::from(a < b),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
+    use std::ops::Div;
     use super::*;
-    use std::str::FromStr;
+    use ruint::{uint};
 
     #[test]
     fn test_ok() {
@@ -605,5 +661,49 @@ mod tests {
         // let b= Fr::from(2u64);
         // let c = shl(a, b);
         // assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
+    }
+
+    #[test]
+    fn test_u_gte() {
+        let result = u_gte(&uint!(10_U256), &uint!(3_U256));
+        assert_eq!(result, uint!(1_U256));
+
+        let result = u_gte(&uint!(3_U256), &uint!(3_U256));
+        assert_eq!(result, uint!(1_U256));
+
+        let result = u_gte(&uint!(2_U256), &uint!(3_U256));
+        assert_eq!(result, uint!(0_U256));
+
+        // -1 >= 3 => 0
+        let result = u_gte(
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495616_U256),
+            &uint!(3_U256));
+        assert_eq!(result, uint!(0_U256));
+
+        // -1 >= -2 => 1
+        let result = u_gte(
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495616_U256),
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256));
+        assert_eq!(result, uint!(1_U256));
+
+        // -2 >= -1 => 0
+        let result = u_gte(
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256),
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495616_U256));
+        assert_eq!(result, uint!(0_U256));
+
+        // -2 == -2 => 1
+        let result = u_gte(
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256),
+            &uint!(21888242871839275222246405745257275088548364400416034343698204186575808495615_U256));
+        assert_eq!(result, uint!(1_U256));
+    }
+
+    #[test]
+    fn test_x() {
+        let x = M.div(uint!(2_U256));
+
+        println!("x: {:?}", x.as_limbs());
+        println!("x: {}", M);
     }
 }
