@@ -999,28 +999,38 @@ fn calc_function_expression_n(
     }
 }
 
-fn var_to_const_int<'a>(v: &'a Var, nodes: &'a Vec<Node>) -> U256 {
+fn var_to_const_int<'a>(
+    v: &'a Var, nodes: &'a Vec<Node>, call_stack: &Vec<String>) -> U256 {
+
     match v {
         Var::Value(v) => {v.clone()}
         Var::Node(node_idx) => {
             match &nodes[*node_idx] {
                 Node::Constant(v) => v.clone(),
                 Node::UnoOp(op, a_idx) => {
-                    let arg = var_to_const_int(&Var::Node(*a_idx), nodes);
+                    let arg = var_to_const_int(
+                        &Var::Node(*a_idx), nodes, call_stack);
                     op.eval(arg.clone())
                 }
                 Node::Op(op, a_idx, b_idx) => {
-                    let a = var_to_const_int(&Var::Node(*a_idx), nodes);
-                    let b = var_to_const_int(&Var::Node(*b_idx), nodes);
+                    let a = var_to_const_int(
+                        &Var::Node(*a_idx), nodes, call_stack);
+                    let b = var_to_const_int(
+                        &Var::Node(*b_idx), nodes, call_stack);
                     op.eval(a.clone(), b.clone())
                 }
                 Node::TresOp(op, a_idx, b_idx, c_idx) => {
-                    let a = var_to_const_int(&Var::Node(*a_idx), nodes);
-                    let b = var_to_const_int(&Var::Node(*b_idx), nodes);
-                    let c = var_to_const_int(&Var::Node(*c_idx), nodes);
+                    let a = var_to_const_int(
+                        &Var::Node(*a_idx), nodes, call_stack);
+                    let b = var_to_const_int(
+                        &Var::Node(*b_idx), nodes, call_stack);
+                    let c = var_to_const_int(
+                        &Var::Node(*c_idx), nodes, call_stack);
                     op.eval(a.clone(), b.clone(), c.clone())
                 }
-                _ => panic!("not a constant: {:?}", &nodes[*node_idx]),
+                _ => panic!(
+                    "not a constant: {:?}; {}",
+                    &nodes[*node_idx], call_stack.join(" -> ")),
             }
         }
     }
@@ -1031,7 +1041,7 @@ fn var_to_const_int<'a>(v: &'a Var, nodes: &'a Vec<Node>) -> U256 {
 fn var_to_const_usize(
     v: &Var, nodes: &Vec<Node>, call_stack: &Vec<String>) -> usize {
 
-    let i = var_to_const_int(v, nodes);
+    let i = var_to_const_int(v, nodes, call_stack);
     bigint_to_usize(&i, call_stack)
 }
 
@@ -1244,7 +1254,7 @@ fn process_function_instruction(
             let cond = calc_function_expression(
                 &branch_bucket.cond, fn_vars, nodes, call_stack);
 
-            if var_to_const_int(&cond, nodes).gt(&U256::ZERO) {
+            if var_to_const_int(&cond, nodes, call_stack).gt(&U256::ZERO) {
                 for i in &branch_bucket.if_branch {
                     let r = process_function_instruction(
                         i, fn_vars, nodes, functions, print_debug, call_stack);
@@ -1268,6 +1278,9 @@ fn process_function_instruction(
             Some(build_return(return_bucket, fn_vars, nodes, call_stack))
         }
         Instruction::Loop(ref loop_bucket) => {
+            // if call_stack.last().unwrap() == "long_div" {
+            //     println!("loop: {}", loop_bucket.to_string());
+            // }
             while check_continue_condition_function(
                 &loop_bucket.continue_condition, fn_vars, nodes, call_stack) {
 
@@ -1328,7 +1341,7 @@ fn check_continue_condition_function(
     nodes: &mut Vec<Node>, call_stack: &Vec<String>) -> bool {
 
     let val = calc_function_expression(inst, fn_vars, nodes, call_stack);
-    let val = var_to_const_int(&val, nodes);
+    let val = var_to_const_int(&val, nodes, call_stack);
     val != U256::ZERO
 }
 
@@ -1945,7 +1958,7 @@ fn parse_args() -> Args {
 
     let usage = |err_msg: &str| -> String {
         eprintln!("{}", err_msg);
-        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized]", args[0]);
+        eprintln!("Usage: {} <circuit_file> <graph_file> [-l <link_library>]* [-i <inputs_file.json>] [-print-unoptimized] [-v]", args[0]);
         std::process::exit(1);
     };
 
