@@ -2019,10 +2019,6 @@ fn main() {
 
     let version = "2.1.9";
 
-    // let main_file = "/Users/alek/src/simple-circuit/circuit3.circom";
-    // let main_file = "/Users/alek/src/circuits/circuits/authV2.circom";
-    // let link_libraries: Vec<PathBuf> =
-    //     vec!["/Users/alek/src/circuits/node_modules/circomlib/circuits".into()];
     let parser_result = parser::run_parser(
         args.circuit_file.clone(), version, args.link_libraries.clone());
     let mut program_archive = match parser_result {
@@ -2098,7 +2094,7 @@ fn main() {
     let mut nodes: Vec<Node> = Vec::new();
     nodes.extend(get_constants(&circuit));
 
-    let (input_signals, input_signal_values) = init_input_signals(
+    let (input_signals, input_signal_values): (HashMap<String, (usize, usize)>, Vec<U256>) = init_input_signals(
         &circuit, &mut nodes, &mut signal_node_idx, args.inputs_file);
 
     // assert that template id is equal to index in templates list
