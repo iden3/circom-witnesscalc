@@ -56,8 +56,8 @@ function test_circuit() {
 	
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
-	cargo run --package witness --bin build-circuit "$circuit_path" "$circuit_graph_path" -l "$circomlib_path"
-	cargo run --package witness --bin calc-witness "$circuit_graph_path" "$inputs_path" "$witness_path"
+	cargo run --package circom_witnesscalc --bin build-circuit "$circuit_path" "$circuit_graph_path" -l "$circomlib_path"
+	cargo run --package circom_witnesscalc --bin calc-witness "$circuit_graph_path" "$inputs_path" "$witness_path"
 	popd > /dev/null
 	
 	# run commands from the working directory

@@ -2,7 +2,7 @@ use std::env;
 use std::fs::File;
 use std::io::Write;
 use std::time::Instant;
-use witness::{calc_witness, wtns_from_witness};
+use circom_witnesscalc::{calc_witness, wtns_from_witness};
 
 struct Args {
     graph_file: String,

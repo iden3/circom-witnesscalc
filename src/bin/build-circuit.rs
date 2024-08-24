@@ -13,8 +13,8 @@ use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
 use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
-use witness::deserialize_inputs;
-use witness::graph::{optimize, Node, Operation, UnoOperation, TresOperation};
+use circom_witnesscalc::deserialize_inputs;
+use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation};
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);

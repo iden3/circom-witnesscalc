@@ -1,7 +1,9 @@
 [package]
-name = "witness"
+name = "circom_witnesscalc"
 version = "0.2.0"
 edition = "2021"
+repository = "https://github.com/iden3/circom-witnesscalc"
+
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
