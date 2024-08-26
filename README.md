@@ -2,53 +2,32 @@
 
 ## Description
 
-This crate provides a fast witness generator for Circom circuits, serving as a drop-in replacement for Circom's witness generator. It was created in response to the slow performance of Circom's WASM generator for larger circuits, which also necessitates a WASM runtime, often a cumbersome requirement. The native C++ generator, though faster, depends on x86 assembly for field operations, rendering it impractical for use on other platforms (e.g., cross-compiling to ARM for mobile devices).
+This crate provides a fast witness generator for Circom circuits, serving as a drop-in replacement for Circom's witness generator.
+It was created in response to the slow performance of Circom's WASM generator for larger circuits, which also necessitates a WASM runtime, often a cumbersome requirement.
+Although the native C++ generator is faster, it requires embedding itself into a compiled binary, which is not always desirable.
+The idea is to have a universal library that can calculate the witness for any Circom circuit without the need for a WASM runtime or embedding a C++ binary.
 
-`circom-witness-rs` comes with two modes:
+`circom-witnesscalc` comes with two executables:
 
-1. Build a Circom circuit using `build-circuit` command. As a result, you will get a binary file of graph operations to calculate the witness for a circuit.
-2. Using the generated bin file and inputs for the circuit, generate a witness using `calc-witness` command or a library function.
+1. `build-circuit` command to build a Circom circuit. As a result, you will get a binary file of graph operations to calculate the witness for a circuit.
+2. `calc-witness` command uses the generated binary file and circuit inputs to generate a witness. This functionality is also availabe as a Rust or C library API.
 
-## Usage
-
-See this [example project](https://github.com/philsippl/semaphore-witness-example) for Semaphore with more details on building. 
-
-See `semaphore-rs` for an [example at runtime](https://github.com/worldcoin/semaphore-rs/blob/62f556bdc1a2a25021dcccc97af4dfa522ab5789/src/protocol/mod.rs#L161-L163).
-
-All of those example were used with `circom compiler 2.1.6` ([dcf7d68](https://github.com/iden3/circom/tree/dcf7d687a81c6d9b3e3840181fd83cdaf5f4ac05)). Using a different version of circom might cause issues due to different c++ code being generated.
-
-## Benchmarks
-
-### [semaphore-rs](https://github.com/worldcoin/semaphore-rs/tree/main)
-**TLDR: For semaphore circuit (depth 30) `circom-witness-rs` is ~25x faster than wasm and ~10x faster than native c++ version.**
-```
-cargo bench --bench=criterion --features=bench,depth_30
-```
-
-With `circom-witness-rs`:q
-```
-witness_30              time:   [993.84 µs 996.62 µs 999.42 µs]
-```
-
-With wasm witness generator from [`circom-compat`](https://github.com/arkworks-rs/circom-compat/blob/master/src/witness/witness_calculator.rs):
-```
-witness_30              time:   [24.630 ms 24.693 ms 24.759 ms]
-```
-
-With native c++ witness generator from circom: `9.640ms`
-
-As a nice side effect of the graph optimizations, the binary size is also reduced heavily. In the example of Semaphore the binary size is reduced from `1.3MB` (`semaphore.wasm`) to `350KB` (`graph.bin`). 
+The project originally inspired by [circom-witness-rs](github.com/philsippl/circom-witness-rs).
 
 ## Unimplemented features
 
-There are still quite a few missing operations that need to be implemented. The list of supported and unsupported operations can be found here. Support for the missing operations is very straighfoward and will be added in the future.
-https://github.com/philsippl/circom-witness-rs/blob/e889cedde49a8929812b825aede55d9668118302/src/generate.rs#L61-L89
+There are some Circom features that are not yet implemented. If you need these features,
+please open an issue with the Circom circuit that doesn't work.
+In the near future, we plan to add support for using input signals in the loop condition to accommodate circuits that uses the `long_div` function from the [zk-email](https://github.com/zkemail/zk-email-verify/blob/8685d35f9137ea566e0a07f6609fde0123d15f51/packages/circuits/lib/bigint-func.circom#L169) project.
 
-## Build witness from intermediate representation
+## Compile a circuit and build the witness graph
 
 To create a circuit graph file from a Circom 2 program, run the following command:
 
 ```shell
+# Using compiled binary
+./build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
+# Or using `cargo` from the root of the repository
 cargo run --package circom_witnesscalc --bin build-circuit <path_to_circuit.circom> <path_to_circuit_graph.bin> [-l <path_to_circom_libs/>]* [-i <inputs_file.json>] [-print-unoptimized]
 ```
 
@@ -60,11 +39,12 @@ Optional flags:
 
 ## Calculate witness from circuit graph created on previous step
 
-> Note: In the inputs file all values of signals should be arrays. Even if they have a single value.
-
 To generate a witness file from a circuit graph and inputs, run the following command.
 
 ```shell
+# Using compiled binary
+./calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
+# Or using `cargo` from the root of the repository
 cargo run --package circom_witnesscalc --bin calc-witness <path_to_circuit_graph.bin> <path_to_inputs.json> <path_to_output_witness.wtns>
 ```
 

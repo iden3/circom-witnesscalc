@@ -38,6 +38,10 @@ if [ ! -d "$circomlib_path" ]; then
 	exit 1
 fi
 
+pushd "${script_dir}" > /dev/null
+cargo build --release
+popd > /dev/null
+
 function test_circuit() {
 	local circuit_path=$1
 	echo "Running $circuit_path"
@@ -56,8 +60,8 @@ function test_circuit() {
 	
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
-	cargo run --package circom_witnesscalc --bin build-circuit "$circuit_path" "$circuit_graph_path" -l "$circomlib_path"
-	cargo run --package circom_witnesscalc --bin calc-witness "$circuit_graph_path" "$inputs_path" "$witness_path"
+	time target/release/build-circuit "$circuit_path" "$circuit_graph_path" -l "$circomlib_path"
+	time target/release/calc-witness "$circuit_graph_path" "$inputs_path" "$witness_path"
 	popd > /dev/null
 	
 	# run commands from the working directory
@@ -68,7 +72,7 @@ function test_circuit() {
 	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"
 	local vk_path="${workdir}/${circuit_name}_${r1cs_md5}_verification_key.json"
 
-	node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
+	time node "${circuit_name}"_js/generate_witness.js "${circuit_name}"_js/"${circuit_name}".wasm "${inputs_path}" "${witness_path}2"
 	snarkjs wej "${witness_path}" "${witness_path}.json"
 	snarkjs wej "${witness_path}2" "${witness_path}2.json"
 	
