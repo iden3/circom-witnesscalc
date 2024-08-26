@@ -1,4 +1,4 @@
-# 🏎️ circom-witness-rs
+# circom-witnesscalc
 
 ## Description
 
