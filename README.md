@@ -12,7 +12,7 @@ The idea is to have a universal library that can calculate the witness for any C
 1. `build-circuit` command to build a Circom circuit. As a result, you will get a binary file of graph operations to calculate the witness for a circuit.
 2. `calc-witness` command uses the generated binary file and circuit inputs to generate a witness. This functionality is also availabe as a Rust or C library API.
 
-The project originally inspired by [circom-witness-rs](github.com/philsippl/circom-witness-rs).
+The project originally inspired by [circom-witness-rs](https://github.com/philsippl/circom-witness-rs).
 
 ## Unimplemented features
 
