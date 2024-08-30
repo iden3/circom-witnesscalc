@@ -1,7 +1,8 @@
+use std::io::Result;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-fn main() {
+fn main() -> Result<()> {
     // The bindgen::Builder is the main entry point
     // to bindgen, and lets you build up options for
     // the resulting bindings.
@@ -23,4 +24,10 @@ fn main() {
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Couldn't write bindings!");
+
+    // Generate protobuf bindings
+    let empty_array: &[&Path] = &[];
+    prost_build::compile_protos(&["protos/messages.proto"], empty_array)?;
+
+    Ok(())
 }

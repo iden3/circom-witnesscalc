@@ -129,6 +129,34 @@ impl Operation {
     }
 }
 
+impl From<&Operation> for crate::proto::DuoOp {
+    fn from(v: &Operation) -> Self {
+        match v {
+            Operation::Mul => crate::proto::DuoOp::Mul,
+            Operation::Div => crate::proto::DuoOp::Div,
+            Operation::Add => crate::proto::DuoOp::Add,
+            Operation::Sub => crate::proto::DuoOp::Sub,
+            Operation::Pow => crate::proto::DuoOp::Pow,
+            Operation::Idiv => crate::proto::DuoOp::Idiv,
+            Operation::Mod => crate::proto::DuoOp::Mod,
+            Operation::MMul => crate::proto::DuoOp::MMul,
+            Operation::Eq => crate::proto::DuoOp::Eq,
+            Operation::Neq => crate::proto::DuoOp::Neq,
+            Operation::Lt => crate::proto::DuoOp::Lt,
+            Operation::Gt => crate::proto::DuoOp::Gt,
+            Operation::Leq => crate::proto::DuoOp::Leq,
+            Operation::Geq => crate::proto::DuoOp::Geq,
+            Operation::Land => crate::proto::DuoOp::Land,
+            Operation::Lor => crate::proto::DuoOp::Lor,
+            Operation::Shl => crate::proto::DuoOp::Shl,
+            Operation::Shr => crate::proto::DuoOp::Shr,
+            Operation::Bor => crate::proto::DuoOp::Bor,
+            Operation::Band => crate::proto::DuoOp::Band,
+            Operation::Bxor => crate::proto::DuoOp::Bxor,
+        }
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum UnoOperation {
     Neg,
@@ -155,6 +183,15 @@ impl UnoOperation {
     }
 }
 
+impl From<&UnoOperation> for crate::proto::UnoOp {
+    fn from(v: &UnoOperation) -> Self {
+        match v {
+            UnoOperation::Neg => crate::proto::UnoOp::Neg,
+            UnoOperation::Id => crate::proto::UnoOp::Id,
+        }
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TresOperation {
     TernCond,
@@ -174,6 +211,14 @@ impl TresOperation {
     }
 }
 
+impl From<&TresOperation> for crate::proto::TresOp {
+    fn from(v: &TresOperation) -> Self {
+        match v {
+            TresOperation::TernCond => crate::proto::TresOp::TernCond,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
     Input(usize),
@@ -184,6 +229,34 @@ pub enum Node {
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
 }
+
+impl Node {
+    pub fn try_const_int(&self, nodes: &Vec<Node>) -> Option<U256> {
+        match self {
+            Node::Constant(v) => Some(v.clone()),
+            Node::UnoOp(op, a_idx) => {
+                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
+                Some(op.eval(arg_a))
+            }
+            Node::Op(op, a_idx, b_idx) => {
+                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
+                let arg_b = (&nodes[*b_idx]).try_const_int(nodes)?;
+                Some(op.eval(arg_a, arg_b))
+            }
+            Node::TresOp(op, a_idx, b_idx, c_idx) => {
+                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
+                let arg_b = (&nodes[*b_idx]).try_const_int(nodes)?;
+                let arg_c = (&nodes[*c_idx]).try_const_int(nodes)?;
+                Some(op.eval(arg_a, arg_b, arg_c))
+            }
+            Node::Input(_) => None,
+            Node::MontConstant(_) => {
+                panic!("MontConstant should not be used in try_const_int")
+            }
+        }
+    }
+}
+
 
 
 fn compute_shl_uint(a: U256, b: U256) -> U256 {

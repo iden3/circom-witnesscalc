@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::{TemplateCode};
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
-use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, ReturnBucket, ReturnType, StatusInput, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use ruint::aliases::U256;
@@ -13,7 +13,7 @@ use code_producers::components::TemplateInstanceIOMap;
 use compiler::circuit_design::function::FunctionCode;
 use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
-use circom_witnesscalc::deserialize_inputs;
+use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
 use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation};
 
 pub const M: U256 =
@@ -75,24 +75,30 @@ fn value_from_instruction_usize(inst: &InstructionPointer) -> usize {
     }
 }
 
-fn int_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> U256 {
-    match value_bucket.parse_as {
-        ValueType::BigInt => match nodes[value_bucket.value] {
-            Node::Constant(ref c) => c.clone(),
-            _ => panic!("not a constant"),
-        },
-        ValueType::U32 => U256::from(value_bucket.value),
-    }
-}
+fn var_from_value_instruction_n(
+    value_bucket: &ValueBucket, nodes: &Vec<Node>, n: usize,
+    call_stack: &Vec<String>) -> Vec<Var> {
 
-fn var_from_value_instruction(value_bucket: &ValueBucket, nodes: &Vec<Node>) -> Var {
     match value_bucket.parse_as {
         ValueType::BigInt => {
-            assert!(matches!(nodes[value_bucket.value], Node::Constant(..)),
-                    "not a constant");
-            Var::Node(value_bucket.value)
+            let mut result = Vec::with_capacity(n);
+
+            for i in 0..n {
+                assert!(
+                    matches!(nodes[value_bucket.value+i], Node::Constant(..)),
+                    "node #{} expected to be a constant, but it is not; {}",
+                    value_bucket.value+i, call_stack.join(" -> "));
+                result.push(Var::Node(value_bucket.value+i));
+            };
+
+            result
         },
-        ValueType::U32 => Var::Value(U256::from(value_bucket.value)),
+        ValueType::U32 => {
+            assert_eq!(n, 1,
+                "for ValueType::U32 number of values is expected to be 1; {}",
+                call_stack.join(" -> "));
+            vec![Var::Value(U256::from(value_bucket.value))]
+        },
     }
 }
 
@@ -408,7 +414,9 @@ lazy_static! {
         m.insert(OperatorType::ShiftR, Operation::Shr);
         m.insert(OperatorType::GreaterEq, Operation::Geq);
         m.insert(OperatorType::Lesser, Operation::Lt);
+        m.insert(OperatorType::Greater, Operation::Gt);
         m.insert(OperatorType::Eq(1), Operation::Eq);
+        m.insert(OperatorType::NotEq, Operation::Neq);
         m.insert(OperatorType::BitOr, Operation::Bor);
         m.insert(OperatorType::BitAnd, Operation::Band);
         m.insert(OperatorType::BitXor, Operation::Bxor);
@@ -648,8 +656,8 @@ fn process_instruction(
                 &branch_bucket.cond, nodes, vars, component_signal_start,
                 signal_node_idx, subcomponents, io_map, print_debug,
                 call_stack);
-            match cond {
-                Var::Value(cond_val) => {
+            match cond.try_const_int(nodes) {
+                Some(cond_val) => {
                     let inst_list = if cond_val == U256::ZERO {
                         &branch_bucket.else_branch
                     } else {
@@ -662,8 +670,14 @@ fn process_instruction(
                             io_map, print_debug, call_stack);
                     }
                 }
-                Var::Node(node_idx) => {
+                None => {
                     // The only option for variable condition is a ternary operation.
+
+                    let node_idx = if let Var::Node(node_idx) = cond {
+                        node_idx
+                    } else {
+                        panic!("[assertion] the only way to get None from try_const_int is to have a Node");
+                    };
 
                     if branch_bucket.if_branch.len() != 1 || branch_bucket.else_branch.len() != 1 {
                         panic!("Non-constant condition may be used only in ternary operation and both branches of code must be of length 1");
@@ -703,7 +717,8 @@ fn process_instruction(
                         }
                         _ => {
                             panic!(
-                                "if branch or else branch is not a store to the signal, which is the only option for ternary operation {} {}",
+                                "if branch or else branch is not a store to the signal, which is the only option for ternary operation\n{}\nIF: {}\nELSE: {}",
+                                call_stack.join(" -> "),
                                 branch_bucket.if_branch[0].to_string(),
                                 branch_bucket.else_branch[0].to_string());
                         }
@@ -946,20 +961,7 @@ fn calc_function_expression_n(
 
     match **inst {
         Instruction::Value(ref value_bucket) => {
-            return match value_bucket.parse_as {
-                ValueType::BigInt => {
-                    let mut result = Vec::with_capacity(n);
-                    for i in 0..n {
-                        if let Node::Constant(..) = nodes[value_bucket.value+i] {
-                            result.push(Var::Node(value_bucket.value+i));
-                        } else {
-                            panic!("not a constant");
-                        }
-                    }
-                    result
-                },
-                ValueType::U32 => { panic!("not implemented: U32") },
-            }
+            var_from_value_instruction_n(value_bucket, nodes, n, call_stack)
         }
         Instruction::Load(ref load_bucket) => {
             match load_bucket.address_type {
@@ -999,49 +1001,15 @@ fn calc_function_expression_n(
     }
 }
 
-fn var_to_const_int<'a>(
-    v: &'a Var, nodes: &'a Vec<Node>, call_stack: &Vec<String>) -> U256 {
-
-    match v {
-        Var::Value(v) => {v.clone()}
-        Var::Node(node_idx) => {
-            match &nodes[*node_idx] {
-                Node::Constant(v) => v.clone(),
-                Node::UnoOp(op, a_idx) => {
-                    let arg = var_to_const_int(
-                        &Var::Node(*a_idx), nodes, call_stack);
-                    op.eval(arg.clone())
-                }
-                Node::Op(op, a_idx, b_idx) => {
-                    let a = var_to_const_int(
-                        &Var::Node(*a_idx), nodes, call_stack);
-                    let b = var_to_const_int(
-                        &Var::Node(*b_idx), nodes, call_stack);
-                    op.eval(a.clone(), b.clone())
-                }
-                Node::TresOp(op, a_idx, b_idx, c_idx) => {
-                    let a = var_to_const_int(
-                        &Var::Node(*a_idx), nodes, call_stack);
-                    let b = var_to_const_int(
-                        &Var::Node(*b_idx), nodes, call_stack);
-                    let c = var_to_const_int(
-                        &Var::Node(*c_idx), nodes, call_stack);
-                    op.eval(a.clone(), b.clone(), c.clone())
-                }
-                _ => panic!(
-                    "not a constant: {:?}; {}",
-                    &nodes[*node_idx], call_stack.join(" -> ")),
-            }
-        }
-    }
-}
-
+// TODO it should return Optional. If None, then the value is not const.
 // Return usize form Var if it is a Var::Value or constant Var::Node.
 // Panics otherwise.
 fn var_to_const_usize(
     v: &Var, nodes: &Vec<Node>, call_stack: &Vec<String>) -> usize {
 
-    let i = var_to_const_int(v, nodes, call_stack);
+    let i = v.try_const_int(nodes).unwrap_or_else(|| {
+        panic!("expected constant value: {}", call_stack.join(" -> "));
+    });
     bigint_to_usize(&i, call_stack)
 }
 
@@ -1174,7 +1142,10 @@ fn build_return(
             FnReturn::Value(v)
         }
         Instruction::Value(ref value_bucket) => {
-            FnReturn::Value(var_from_value_instruction(value_bucket, nodes))
+            let mut vars = var_from_value_instruction_n(
+                value_bucket, nodes, 1, call_stack);
+            assert_eq!(vars.len(), 1, "expected one result value");
+            FnReturn::Value(vars.pop().unwrap())
         }
         _ => {
             panic!("unexpected instruction for return statement: {}",
@@ -1200,6 +1171,48 @@ fn calc_return_load_idx(
     };
     let idx = calc_function_expression(ip, fn_vars, nodes, call_stack);
     var_to_const_usize(&idx, nodes, call_stack)
+}
+
+fn store_function_variable(
+    store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var>>,
+    nodes: &mut Vec<Node>, call_stack: &Vec<String>) {
+
+    assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
+            "functions can store only inside variables: dest_address_type: {}",
+            store_bucket.dest_address_type.to_string());
+
+    let (location, template_header) = match &store_bucket.dest {
+        LocationRule::Indexed {
+            location,
+            template_header,
+        } => {
+            (location, template_header)
+        }
+        LocationRule::Mapped { .. } => {
+            panic!("location rule supposed to be Indexed for variables");
+        }
+    };
+
+    let lvar_idx = calc_function_expression(
+        location, fn_vars, nodes, call_stack);
+    let lvar_idx = var_to_const_usize(
+        &lvar_idx, nodes, call_stack);
+    // println!("store bucket [10]: {} / {}", lvar_idx, store_bucket.context.size);
+    if store_bucket.context.size == 1 {
+        fn_vars[lvar_idx] = Some(calc_function_expression(
+            &store_bucket.src, fn_vars, nodes,
+            call_stack));
+    } else {
+        let values = calc_function_expression_n(
+            &store_bucket.src, fn_vars, nodes,
+            store_bucket.context.size, call_stack);
+        assert_eq!(values.len(), store_bucket.context.size);
+        for i in 0..store_bucket.context.size {
+            fn_vars[lvar_idx + i] = Some(values[i].clone());
+        }
+    }
+
+    panic!("not implemented");
 }
 
 fn process_function_instruction(
@@ -1254,7 +1267,31 @@ fn process_function_instruction(
             let cond = calc_function_expression(
                 &branch_bucket.cond, fn_vars, nodes, call_stack);
 
-            if var_to_const_int(&cond, nodes, call_stack).gt(&U256::ZERO) {
+            let cond_int = cond.try_const_int(nodes);
+            // match cond_int {
+            //     None => {}
+            //     Some(v) => {
+            //         let instructions = if v == U256::ZERO {
+            //             &branch_bucket.else_branch
+            //         } else {
+            //             &branch_bucket.if_branch
+            //         };
+            //         for i in instructions {
+            //             let r = process_function_instruction(
+            //                 i, fn_vars, nodes, functions, print_debug, call_stack);
+            //             if r.is_some() {
+            //                 return r;
+            //             }
+            //         }
+            //     }
+            // }
+
+            let cond2 = cond_int.unwrap_or_else(
+                || panic!(
+                    "condition is not a constant: {}",
+                    call_stack.join(" -> ")));
+
+            if cond2.gt(&U256::ZERO) {
                 for i in &branch_bucket.if_branch {
                     let r = process_function_instruction(
                         i, fn_vars, nodes, functions, print_debug, call_stack);
@@ -1340,8 +1377,13 @@ fn check_continue_condition_function(
     inst: &InstructionPointer, fn_vars: &mut Vec<Option<Var>>,
     nodes: &mut Vec<Node>, call_stack: &Vec<String>) -> bool {
 
-    let val = calc_function_expression(inst, fn_vars, nodes, call_stack);
-    let val = var_to_const_int(&val, nodes, call_stack);
+    let val = calc_function_expression(inst, fn_vars, nodes, call_stack)
+        .try_const_int(nodes)
+        .unwrap_or_else(
+            || panic!(
+                "condition is not a constant: {}",
+                call_stack.join(" -> ")));
+
     val != U256::ZERO
 }
 
@@ -1441,6 +1483,19 @@ impl ToString for Var {
     }
 }
 
+
+impl Var {
+    // try to calculate constant value of the Var. If Var is not a constant
+    // and depends on input signal, return None.
+    fn try_const_int<'a>(&self, nodes: &'a Vec<Node>) -> Option<U256> {
+        match self {
+            Var::Value(v) => Some(v.clone()),
+            Var::Node(node_idx) =>
+                (&nodes[*node_idx]).try_const_int(nodes),
+        }
+    }
+}
+
 fn load_n(
     load_bucket: &LoadBucket, nodes: &mut Vec<Node>,
     vars: &mut Vec<Option<Var>>, component_signal_start: usize,
@@ -1499,11 +1554,12 @@ fn load_n(
                         location, nodes, vars, component_signal_start,
                         signal_node_idx, subcomponents, io_map, print_debug,
                         call_stack);
-                    if let Var::Value(c) = signal_idx {
-                        (bigint_to_usize(&c, call_stack), template_header.as_ref().unwrap_or(&"-".to_string()).clone())
-                    } else {
-                        panic!("signal index is not a constant");
-                    }
+                    let signal_idx = signal_idx.try_const_int(nodes)
+                        .unwrap_or_else(|| panic!(
+                            "signal index is not a constant: {}",
+                            call_stack.join(" -> ")));
+                    (bigint_to_usize(&signal_idx, call_stack),
+                     template_header.as_ref().unwrap_or(&"-".to_string()).clone())
                 }
                 LocationRule::Mapped { ref signal_code, ref indexes } => {
                     calc_mapped_signal_idx(
@@ -1597,14 +1653,22 @@ fn build_unary_op_var(
         Var::Node(node_idx) => {
             let node = Node::UnoOp(match compute_bucket.op {
                 OperatorType::PrefixSub => UnoOperation::Neg,
-                OperatorType::ToAddress => { panic!("operator does not support variable address") }
+                OperatorType::ToAddress => {
+                    let n = &nodes[*node_idx];
+                    let i = n.try_const_int(nodes);
+                    assert!(
+                        matches!(i, Some(_)),
+                        "ToAddress argument should be a constant: {}",
+                        call_stack.join(" -> "));
+                    UnoOperation::Id
+                }
                 _ => {
                     todo!(
                         "operator not implemented: {}",
                         compute_bucket.op.to_string()
                     );
                 }
-            }, node_idx.clone());
+            }, *node_idx);
             nodes.push(node);
             Var::Node(nodes.len() - 1)
         }
@@ -1697,6 +1761,8 @@ fn build_binary_op_var(
                 OperatorType::BitOr => Operation::Bor,
                 OperatorType::BitAnd => Operation::Band,
                 OperatorType::BitXor => Operation::Bxor,
+                OperatorType::MulAddress => Operation::Mul,
+                OperatorType::AddAddress => Operation::Add,
                 _ => {
                     todo!(
                         "operator not implemented: {}",
@@ -1725,7 +1791,10 @@ fn calc_expression(
 ) -> Var {
     match **inst {
         Instruction::Value(ref value_bucket) => {
-            Var::Value(int_from_value_instruction(value_bucket, nodes))
+            let mut vars = var_from_value_instruction_n(
+                value_bucket, nodes, 1, call_stack);
+            assert_eq!(vars.len(), 1, "expected one result value");
+            vars.pop().unwrap()
         }
         Instruction::Load(ref load_bucket) => {
             let r = load_n(
@@ -1818,14 +1887,15 @@ fn check_continue_condition(
     call_stack: &Vec<String>,
 ) -> bool {
     let val = calc_expression(
-        inst, nodes, vars, component_signal_start, signal_node_idx,
-        subcomponents, io_map, print_debug, call_stack);
-    match val {
-        Var::Value(c) => c != U256::ZERO,
-        _ => {
-            panic!("continue condition is not a constant");
-        }
-    }
+            inst, nodes, vars, component_signal_start, signal_node_idx,
+            subcomponents, io_map, print_debug, call_stack)
+        .try_const_int(nodes)
+        .unwrap_or_else(
+            || panic!(
+                "condition is not a constant: {}",
+                call_stack.join(" -> ")));
+
+    val != U256::ZERO
 }
 
 fn get_constants(circuit: &Circuit) -> Vec<Node> {
@@ -1841,7 +1911,7 @@ fn init_input_signals(
     nodes: &mut Vec<Node>,
     signal_node_idx: &mut Vec<usize>,
     input_file: Option<String>,
-) -> (HashMap<String, (usize, usize)>, Vec<U256>) {
+) -> (InputSignalsInfo, Vec<U256>) {
     let input_list = circuit.c_producer.get_main_input_list();
     let mut signal_values: Vec<U256> = Vec::new();
     signal_values.push(U256::from(1));
@@ -2094,7 +2164,7 @@ fn main() {
     let mut nodes: Vec<Node> = Vec::new();
     nodes.extend(get_constants(&circuit));
 
-    let (input_signals, input_signal_values): (HashMap<String, (usize, usize)>, Vec<U256>) = init_input_signals(
+    let (input_signals, input_signal_values): (InputSignalsInfo, Vec<U256>) = init_input_signals(
         &circuit, &mut nodes, &mut signal_node_idx, args.inputs_file);
 
     // assert that template id is equal to index in templates list
@@ -2134,11 +2204,6 @@ fn main() {
         nodes.len(),
         signals.len()
     );
-
-    // let mut input_signals: HashMap<String, (usize, usize)> = HashMap::new();
-    // for (name, offset, len) in circuit.c_producer.get_main_input_list() {
-    //     input_signals.insert(name.clone(), (offset.clone(), len.clone()));
-    // }
 
     let bytes = postcard::to_stdvec(&(&nodes, &signals, &input_signals)).unwrap();
     fs::write(&args.graph_file, bytes).unwrap();
@@ -2223,12 +2288,13 @@ fn store_subcomponent_signals(
                 location, nodes, tmpl_vars, component_signal_start,
                 signal_node_idx, subcomponents, io_map, print_debug,
                 call_stack);
-            if let Var::Value(ref c) = signal_idx {
-                (bigint_to_usize(c, call_stack),
-                 template_header.as_ref().unwrap_or(&"-".to_string()).clone())
-            } else {
-                panic!("signal index is not a constant");
-            }
+            let signal_idx = var_to_const_usize(
+                &signal_idx, nodes, call_stack);
+
+            // TODO after refactor var_to_const_usize if signal_idx is None
+            //      panic with message "signal index is not a constant"
+
+            (signal_idx, template_header.as_ref().unwrap_or(&"-".to_string()).clone())
         }
         LocationRule::Mapped { ref signal_code, ref indexes } => {
             calc_mapped_signal_idx(

@@ -33,6 +33,7 @@ program_structure = { git = "https://github.com/olomix/circom.git", branch = "ma
 parser = { git = "https://github.com/olomix/circom.git", branch = "master" }
 type_analysis = { git = "https://github.com/olomix/circom.git", branch = "master" }
 constraint_generation = { git = "https://github.com/olomix/circom.git", branch = "master" }
+prost = "0.13.1"
 
 
 [profile.release]
@@ -45,3 +46,4 @@ crate-type = ["lib", "staticlib", "cdylib"]
 
 [build-dependencies]
 bindgen = "0.69.4"
+prost-build = "0.13.1"
