@@ -3,7 +3,8 @@ use std::{
     ops::{BitAnd, Shl, Shr},
 };
 use std::cmp::Ordering;
-use std::ops::{BitOr, BitXor};
+use std::error::Error;
+use std::ops::{BitOr, BitXor, Deref};
 use crate::field::M;
 use ark_bn254::Fr;
 use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One};
@@ -230,33 +231,87 @@ pub enum Node {
     TresOp(TresOperation, usize, usize, usize),
 }
 
-impl Node {
-    pub fn try_const_int(&self, nodes: &Vec<Node>) -> Option<U256> {
-        match self {
-            Node::Constant(v) => Some(v.clone()),
-            Node::UnoOp(op, a_idx) => {
-                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
-                Some(op.eval(arg_a))
+// TODO remove pub from Vec<Node>
+pub struct Nodes(pub Vec<Node>);
+
+impl Nodes {
+    pub fn new() -> Self {
+        Nodes(Vec::new())
+    }
+
+    pub fn to_const(&self, idx: NodeIdx) -> Result<U256, NodeConstErr> {
+        let me = self.0.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
+        match me {
+            Node::Constant(v) => Ok(v.clone()),
+            Node::UnoOp(op, a) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?))
             }
-            Node::Op(op, a_idx, b_idx) => {
-                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
-                let arg_b = (&nodes[*b_idx]).try_const_int(nodes)?;
-                Some(op.eval(arg_a, arg_b))
+            Node::Op(op, a, b) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?,
+                    self.to_const(NodeIdx(*b))?))
             }
-            Node::TresOp(op, a_idx, b_idx, c_idx) => {
-                let arg_a = (&nodes[*a_idx]).try_const_int(nodes)?;
-                let arg_b = (&nodes[*b_idx]).try_const_int(nodes)?;
-                let arg_c = (&nodes[*c_idx]).try_const_int(nodes)?;
-                Some(op.eval(arg_a, arg_b, arg_c))
+            Node::TresOp(op, a, b, c) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?,
+                    self.to_const(NodeIdx(*b))?,
+                    self.to_const(NodeIdx(*c))?))
             }
-            Node::Input(_) => None,
+            Node::Input(_) => Err(NodeConstErr::InputSignal),
             Node::MontConstant(_) => {
-                panic!("MontConstant should not be used in try_const_int")
+                panic!("MontConstant should not be used here")
+            }
+        }
+    }
+
+    pub fn push(&mut self, n: Node) -> NodeIdx {
+        self.0.push(n);
+        NodeIdx(self.0.len() - 1)
+    }
+    
+    pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
+        self.0.get(idx.0)
+    }
+}
+
+impl Deref for Nodes {
+    type Target = Vec<Node>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct NodeIdx(pub usize);
+
+impl From<usize> for NodeIdx {
+    fn from(v: usize) -> Self {
+        NodeIdx(v)
+    }
+}
+
+#[derive(Debug)]
+pub enum NodeConstErr {
+    EmptyNode(NodeIdx),
+    InputSignal,
+}
+
+impl std::fmt::Display for NodeConstErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeConstErr::EmptyNode(idx) => {
+                write!(f, "empty node at index {}", idx.0)
+            }
+            NodeConstErr::InputSignal => {
+                write!(f, "input signal is not a constant")
             }
         }
     }
 }
 
+impl Error for NodeConstErr {}
 
 
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
@@ -778,5 +833,13 @@ mod tests {
 
         println!("x: {:?}", x.as_limbs());
         println!("x: {}", M);
+    }
+
+    #[test]
+    fn test_2() {
+        let nodes: Vec<Node> = vec![];
+        // let node = nodes[0];
+        let node = nodes.get(0);
+        println!("{:?}", node);
     }
 }

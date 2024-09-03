@@ -69,7 +69,7 @@ fn serialize_witnesscalc_graph(
     buf
 }
 
-fn deserialize_witnesscalc_graph<T: std::io::BufRead>(r: T) {}
+fn deserialize_witnesscalc_graph<T: std::io::BufRead>(_r: T) {}
 
 #[cfg(test)]
 mod tests {
