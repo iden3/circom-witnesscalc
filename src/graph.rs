@@ -3,7 +3,8 @@ use std::{
     ops::{BitAnd, Shl, Shr},
 };
 use std::cmp::Ordering;
-use std::ops::{BitOr, BitXor};
+use std::error::Error;
+use std::ops::{BitOr, BitXor, Deref};
 use crate::field::M;
 use ark_bn254::Fr;
 use ark_ff::{BigInt, PrimeField, BigInteger, Zero, One};
@@ -42,7 +43,6 @@ pub enum Operation {
     Pow,
     Idiv,
     Mod,
-    MMul,
     Eq,
     Neq,
     Lt,
@@ -96,35 +96,77 @@ impl Operation {
             //      bigger then modulus
             Bxor => a.bitxor(b),
             Idiv => a / b,
-            // TODO implement other operators
-            _ => unimplemented!("operator {:?} not implemented", self),
         }
     }
 
     pub fn eval_fr(&self, a: Fr, b: Fr) -> Fr {
         use Operation::*;
         match self {
-            Add => a + b,
-            Sub => a - b,
             Mul => a * b,
-            Shr => shr(a, b),
-            Shl => shl(a, b),
-            Bor => bit_or(a, b),
-            Band => bit_and(a, b),
-            Bxor => bit_xor(a, b),
-
-            Div => if b.is_zero() { Fr::zero() } else { a / b },
             // We always should return something on the circuit execution.
             // So in case of division by 0 we would return 0. And the proof
             // should be invalid in the end.
-            Neq => {
-                match a.cmp(&b) {
-                    std::cmp::Ordering::Equal => Fr::zero(),
-                    _ => Fr::one(),
-                }
+            Div => if b.is_zero() { Fr::zero() } else { a / b },
+            Add => a + b,
+            Sub => a - b,
+            Idiv => if b.is_zero() {
+                Fr::zero()
+            } else {
+                Fr::new((Into::<U256>::into(a) / Into::<U256>::into(b)).into())
             },
+            Mod => if b.is_zero() {
+                Fr::zero()
+            } else {
+                Fr::new((Into::<U256>::into(a) % Into::<U256>::into(b)).into())
+            },
+            Eq => match a.cmp(&b) {
+                Ordering::Equal => Fr::one(),
+                _ => Fr::zero(),
+            }
+            Neq => match a.cmp(&b) {
+                Ordering::Equal => Fr::zero(),
+                _ => Fr::one(),
+            },
+            Lt => Fr::new(u_lt(&a.into(), &b.into()).into()),
+            Gt => Fr::new(u_gt(&a.into(), &b.into()).into()),
+            Leq => Fr::new(u_lte(&a.into(), &b.into()).into()),
+            Geq => Fr::new(u_gte(&a.into(), &b.into()).into()),
+            Land => if a.is_zero() || b.is_zero() { Fr::zero() } else { Fr::one() },
+            Lor => if a.is_zero() && b.is_zero() { Fr::zero() } else { Fr::one() },
+            Shl => shl(a, b),
+            Shr => shr(a, b),
+            Bor => bit_or(a, b),
+            Band => bit_and(a, b),
+            Bxor => bit_xor(a, b),
             // TODO implement other operators
             _ => unimplemented!("operator {:?} not implemented for Montgomery", self),
+        }
+    }
+}
+
+impl From<&Operation> for crate::proto::DuoOp {
+    fn from(v: &Operation) -> Self {
+        match v {
+            Operation::Mul => crate::proto::DuoOp::Mul,
+            Operation::Div => crate::proto::DuoOp::Div,
+            Operation::Add => crate::proto::DuoOp::Add,
+            Operation::Sub => crate::proto::DuoOp::Sub,
+            Operation::Pow => crate::proto::DuoOp::Pow,
+            Operation::Idiv => crate::proto::DuoOp::Idiv,
+            Operation::Mod => crate::proto::DuoOp::Mod,
+            Operation::Eq => crate::proto::DuoOp::Eq,
+            Operation::Neq => crate::proto::DuoOp::Neq,
+            Operation::Lt => crate::proto::DuoOp::Lt,
+            Operation::Gt => crate::proto::DuoOp::Gt,
+            Operation::Leq => crate::proto::DuoOp::Leq,
+            Operation::Geq => crate::proto::DuoOp::Geq,
+            Operation::Land => crate::proto::DuoOp::Land,
+            Operation::Lor => crate::proto::DuoOp::Lor,
+            Operation::Shl => crate::proto::DuoOp::Shl,
+            Operation::Shr => crate::proto::DuoOp::Shr,
+            Operation::Bor => crate::proto::DuoOp::Bor,
+            Operation::Band => crate::proto::DuoOp::Band,
+            Operation::Bxor => crate::proto::DuoOp::Bxor,
         }
     }
 }
@@ -155,6 +197,15 @@ impl UnoOperation {
     }
 }
 
+impl From<&UnoOperation> for crate::proto::UnoOp {
+    fn from(v: &UnoOperation) -> Self {
+        match v {
+            UnoOperation::Neg => crate::proto::UnoOp::Neg,
+            UnoOperation::Id => crate::proto::UnoOp::Id,
+        }
+    }
+}
+
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum TresOperation {
     TernCond,
@@ -174,6 +225,14 @@ impl TresOperation {
     }
 }
 
+impl From<&TresOperation> for crate::proto::TresOp {
+    fn from(v: &TresOperation) -> Self {
+        match v {
+            TresOperation::TernCond => crate::proto::TresOp::TernCond,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Node {
     Input(usize),
@@ -184,6 +243,88 @@ pub enum Node {
     Op(Operation, usize, usize),
     TresOp(TresOperation, usize, usize, usize),
 }
+
+// TODO remove pub from Vec<Node>
+pub struct Nodes(pub Vec<Node>);
+
+impl Nodes {
+    pub fn new() -> Self {
+        Nodes(Vec::new())
+    }
+
+    pub fn to_const(&self, idx: NodeIdx) -> Result<U256, NodeConstErr> {
+        let me = self.0.get(idx.0).ok_or(NodeConstErr::EmptyNode(idx))?;
+        match me {
+            Node::Constant(v) => Ok(v.clone()),
+            Node::UnoOp(op, a) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?))
+            }
+            Node::Op(op, a, b) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?,
+                    self.to_const(NodeIdx(*b))?))
+            }
+            Node::TresOp(op, a, b, c) => {
+                Ok(op.eval(
+                    self.to_const(NodeIdx(*a))?,
+                    self.to_const(NodeIdx(*b))?,
+                    self.to_const(NodeIdx(*c))?))
+            }
+            Node::Input(_) => Err(NodeConstErr::InputSignal),
+            Node::MontConstant(_) => {
+                panic!("MontConstant should not be used here")
+            }
+        }
+    }
+
+    pub fn push(&mut self, n: Node) -> NodeIdx {
+        self.0.push(n);
+        NodeIdx(self.0.len() - 1)
+    }
+    
+    pub fn get(&self, idx: NodeIdx) -> Option<&Node> {
+        self.0.get(idx.0)
+    }
+}
+
+impl Deref for Nodes {
+    type Target = Vec<Node>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct NodeIdx(pub usize);
+
+impl From<usize> for NodeIdx {
+    fn from(v: usize) -> Self {
+        NodeIdx(v)
+    }
+}
+
+#[derive(Debug)]
+pub enum NodeConstErr {
+    EmptyNode(NodeIdx),
+    InputSignal,
+}
+
+impl std::fmt::Display for NodeConstErr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeConstErr::EmptyNode(idx) => {
+                write!(f, "empty node at index {}", idx.0)
+            }
+            NodeConstErr::InputSignal => {
+                write!(f, "input signal is not a constant")
+            }
+        }
+    }
+}
+
+impl Error for NodeConstErr {}
 
 
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
@@ -467,8 +608,8 @@ pub fn montgomery_form(nodes: &mut [Node]) {
             Constant(c) => *node = MontConstant(Fr::new((*c).into())),
             MontConstant(..) => (),
             Input(..) => (),
-            Op(Add | Sub | Mul | Shr | Bor | Band | Bxor | Div | Shl | Neq, ..) => (),
-            Op(op, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
+            Op(Mul | Div | Add | Sub | Idiv | Mod | Eq | Neq | Lt | Gt | Leq | Geq | Land | Lor | Shl | Shr | Bor | Band | Bxor , ..) => (),
+            Op(op @ Pow, ..) => unimplemented!("Operators Montgomery form: {:?}", op),
             UnoOp(UnoOperation::Neg, ..) => (),
             UnoOp(op, ..) => unimplemented!("Uno Operators Montgomery form: {:?}", op),
             TresOp(TresOperation::TernCond, ..) => (),
@@ -633,6 +774,7 @@ mod tests {
     use std::ops::Div;
     use super::*;
     use ruint::{uint};
+    use std::str::FromStr;
 
     #[test]
     fn test_ok() {
@@ -640,6 +782,47 @@ mod tests {
         let b= Fr::from(2u64);
         let c = shl(a, b);
         assert_eq!(c.cmp(&Fr::from(16u64)), Ordering::Equal)
+    }
+
+    #[test]
+    fn test_div() {
+        assert_eq!(
+            Operation::Div.eval_fr(Fr::from(2u64), Fr::from(3u64)),
+            Fr::from_str("7296080957279758407415468581752425029516121466805344781232734728858602831873").unwrap());
+
+        assert_eq!(
+            Operation::Div.eval_fr(Fr::from(6u64), Fr::from(2u64)),
+            Fr::from_str("3").unwrap());
+
+        assert_eq!(
+            Operation::Div.eval_fr(Fr::from(7u64), Fr::from(2u64)),
+            Fr::from_str("10944121435919637611123202872628637544274182200208017171849102093287904247812").unwrap());
+    }
+
+    #[test]
+    fn test_idiv() {
+        assert_eq!(
+            Operation::Idiv.eval_fr(Fr::from(2u64), Fr::from(3u64)),
+            Fr::from_str("0").unwrap());
+
+        assert_eq!(
+            Operation::Idiv.eval_fr(Fr::from(6u64), Fr::from(2u64)),
+            Fr::from_str("3").unwrap());
+
+        assert_eq!(
+            Operation::Idiv.eval_fr(Fr::from(7u64), Fr::from(2u64)),
+            Fr::from_str("3").unwrap());
+    }
+
+    #[test]
+    fn test_fr_mod() {
+        assert_eq!(
+            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(2u64)),
+            Fr::from_str("1").unwrap());
+
+        assert_eq!(
+            Operation::Mod.eval_fr(Fr::from(7u64), Fr::from(9u64)),
+            Fr::from_str("7").unwrap());
     }
 
     #[test]
@@ -705,5 +888,13 @@ mod tests {
 
         println!("x: {:?}", x.as_limbs());
         println!("x: {}", M);
+    }
+
+    #[test]
+    fn test_2() {
+        let nodes: Vec<Node> = vec![];
+        // let node = nodes[0];
+        let node = nodes.get(0);
+        println!("{:?}", node);
     }
 }

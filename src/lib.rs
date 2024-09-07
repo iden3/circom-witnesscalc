@@ -4,6 +4,8 @@
 // #[allow(dead_code)]
 mod field;
 pub mod graph;
+mod storage;
+
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
 use std::slice::from_raw_parts;
@@ -12,6 +14,12 @@ use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
 use crate::field::M;
+
+pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
+
+pub mod proto {
+    include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.rs"));
+}
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 // include!("bindings.rs");
@@ -109,7 +117,7 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error>
 
     let inputs = deserialize_inputs(inputs.as_bytes())?;
 
-    let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, HashMap<String, (usize, usize)>) =
+    let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
         postcard::from_bytes(graph_data).unwrap();
 
     let mut inputs_buffer = get_inputs_buffer(get_inputs_size(&nodes));
@@ -135,8 +143,7 @@ fn get_inputs_size(nodes: &Vec<Node>) -> usize {
 }
 
 fn populate_inputs(
-    input_list: &HashMap<String, Vec<U256>>,
-    inputs_info: &HashMap<String, (usize, usize)>,
+    input_list: &HashMap<String, Vec<U256>>, inputs_info: &InputSignalsInfo,
     input_buffer: &mut Vec<U256>) {
     for (key, value) in input_list {
         let (offset, len) = inputs_info[key];
@@ -233,8 +240,10 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use prost::Message;
     use ruint::aliases::U256;
     use ruint::{uint};
+    use crate::proto::InputNode;
 
     #[test]
     fn test_ok() {
@@ -259,6 +268,15 @@ mod tests {
         for (key, value) in &inputs {
             assert_eq!(want.get(key), Some(value), "Mismatch at key: {}", key);
         }
+    }
+
+    #[test]
+    fn test_ok2() {
+        let i: InputNode = InputNode {
+            idx: 1,
+        };
+        let v = i.encode_to_vec();
+        println!("{:?}", v.len());
     }
 
 }
