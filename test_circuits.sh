@@ -2,7 +2,7 @@
 
 set -eu
 
-ptau_url="https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_19.ptau"
+ptau_url="https://storage.googleapis.com/zkevm/ptau/powersOfTau28_hez_final_18.ptau"
 
 required_commands=(circom snarkjs curl cargo node cmp)
 
@@ -60,14 +60,14 @@ function test_circuit() {
 	
 	# run commands from the project directory
 	pushd "${script_dir}" > /dev/null
-	time target/release/build-circuit "$circuit_path" "$circuit_graph_path" -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules/@zk-kit/circuits/circom -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules/circomlib/circuits/
+	time target/release/build-circuit "$circuit_path" "$circuit_graph_path" -l "$circomlib_path"
 	time target/release/calc-witness "$circuit_graph_path" "$inputs_path" "$witness_path"
 	popd > /dev/null
 	
 	# run commands from the working directory
 	pushd "$workdir" > /dev/null
 	
-	circom -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules/@zk-kit/circuits/circom -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules/circomlib/circuits/ --r1cs --wasm "$circuit_path"
+	circom -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules -l "$circomlib_path"
 	local r1cs_md5=$(openssl dgst -hex -md5 "${r1cs_path}" | awk '{print $2}')
 	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"
 	local vk_path="${workdir}/${circuit_name}_${r1cs_md5}_verification_key.json"
