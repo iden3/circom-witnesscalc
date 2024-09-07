@@ -67,7 +67,7 @@ function test_circuit() {
 	# run commands from the working directory
 	pushd "$workdir" > /dev/null
 	
-	circom -l /Users/alek/src/circom_witnesscalc/test_deps/openpassport/circuits/node_modules -l "$circomlib_path"
+  circom -l "${circomlib_path}" --r1cs --wasm "$circuit_path"
 	local r1cs_md5=$(openssl dgst -hex -md5 "${r1cs_path}" | awk '{print $2}')
 	local zkey_path="${circuit_name}_${r1cs_md5}_final.zkey"
 	local vk_path="${workdir}/${circuit_name}_${r1cs_md5}_verification_key.json"
