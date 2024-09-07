@@ -10,20 +10,19 @@ enum DuoOp {
     Pow = 4;
     Idiv = 5;
     Mod = 6;
-    MMul = 7;
-    Eq = 8;
-    Neq = 9;
-    Lt = 10;
-    Gt = 11;
-    Leq = 12;
-    Geq = 13;
-    Land = 14;
-    Lor = 15;
-    Shl = 16;
-    Shr = 17;
-    Bor = 18;
-    Band = 19;
-    Bxor = 20;
+    Eq = 7;
+    Neq = 8;
+    Lt = 9;
+    Gt = 10;
+    Leq = 11;
+    Geq = 12;
+    Land = 13;
+    Lor = 14;
+    Shl = 15;
+    Shr = 16;
+    Bor = 17;
+    Band = 18;
+    Bxor = 19;
 }
 
 enum UnoOp {

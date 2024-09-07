@@ -62,20 +62,6 @@ fn try_signal_store<'a>(
     }
 }
 
-fn value_from_instruction_usize(inst: &InstructionPointer) -> usize {
-    match **inst {
-        Instruction::Value(ref value_bucket) => match value_bucket.parse_as {
-            ValueType::BigInt => {
-                panic!("unexpected value type for usize: BigInt")
-            }
-            ValueType::U32 => return value_bucket.value,
-        },
-        _ => {
-            panic!("not implemented: {:?}", inst.to_string());
-        }
-    }
-}
-
 fn var_from_value_instruction_n(
     value_bucket: &ValueBucket, nodes: &Nodes, n: usize,
     call_stack: &Vec<String>) -> Vec<Var> {
@@ -412,11 +398,13 @@ lazy_static! {
         m.insert(OperatorType::Mod, Operation::Mod);
         m.insert(OperatorType::ShiftL, Operation::Shl);
         m.insert(OperatorType::ShiftR, Operation::Shr);
+        m.insert(OperatorType::LesserEq, Operation::Leq);
         m.insert(OperatorType::GreaterEq, Operation::Geq);
         m.insert(OperatorType::Lesser, Operation::Lt);
         m.insert(OperatorType::Greater, Operation::Gt);
         m.insert(OperatorType::Eq(1), Operation::Eq);
         m.insert(OperatorType::NotEq, Operation::Neq);
+        m.insert(OperatorType::BoolAnd, Operation::Land);
         m.insert(OperatorType::BitOr, Operation::Bor);
         m.insert(OperatorType::BitAnd, Operation::Band);
         m.insert(OperatorType::BitXor, Operation::Bxor);
@@ -574,7 +562,13 @@ fn process_instruction(
                             if template_header.is_some() {
                                 panic!("not implemented: template_header expected to be None");
                             }
-                            let lvar_idx = value_from_instruction_usize(location);
+                            let lvar_idx =
+                                calc_expression(
+                                    location, nodes, vars,
+                                    component_signal_start, signal_node_idx,
+                                    subcomponents, io_map, print_debug,
+                                    call_stack)
+                                .must_const_usize(nodes, call_stack);
                             let var_exprs = calc_expression_n(
                                 &store_bucket.src, nodes, vars,
                                 component_signal_start, signal_node_idx,
@@ -806,7 +800,8 @@ fn process_instruction(
 
 fn store_function_return_results_into_variable(
     final_data: &FinalData, src_vars: &Vec<Option<Var>>, ret: &FnReturn,
-    dst_vars: &mut Vec<Option<Var>>) {
+    dst_vars: &mut Vec<Option<Var>>, nodes: &mut Nodes,
+    call_stack: &Vec<String>) {
 
     assert!(matches!(final_data.dest_address_type, AddressType::Variable));
 
@@ -818,7 +813,9 @@ fn store_function_return_results_into_variable(
             if template_header.is_some() {
                 panic!("not implemented: template_header expected to be None");
             }
-            let lvar_idx = value_from_instruction_usize(location);
+            let lvar_idx =
+                calc_function_expression(location, dst_vars, nodes, call_stack)
+                    .must_const_usize(nodes, call_stack);
 
             match ret {
                 FnReturn::FnVar { idx, .. } => {
@@ -907,11 +904,11 @@ fn store_function_return_results(
     match &final_data.dest_address_type {
         AddressType::Signal => todo!("Signal"),
         AddressType::Variable => {
-            return store_function_return_results_into_variable(
-                final_data, src_vars, ret, dst_vars);
+            store_function_return_results_into_variable(
+                final_data, src_vars, ret, dst_vars, nodes, call_stack);
         }
         AddressType::SubcmpSignal {..} => {
-            return store_function_return_results_into_subsignal(
+            store_function_return_results_into_subsignal(
                 final_data, src_vars, ret, dst_vars, nodes,
                 component_signal_start, signal_node_idx, subcomponents,
                 io_map, templates, functions, print_debug, call_stack);
@@ -1106,7 +1103,9 @@ fn compute_function_expression(
         }
     }
 
-    panic!("unsupported operator: {}", compute_bucket.op.to_string())
+    panic!(
+        "unsupported operator: {}: {}",
+        compute_bucket.op.to_string(), call_stack.join(" -> "));
 }
 
 enum FnReturn {
@@ -1163,9 +1162,10 @@ fn calc_return_load_idx(
     idx.must_const_usize(nodes, call_stack)
 }
 
+// return variable value and it's index
 fn store_function_variable(
     store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var>>,
-    nodes: &mut Nodes, call_stack: &Vec<String>) {
+    nodes: &mut Nodes, call_stack: &Vec<String>) -> (Var, usize) {
 
     assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
             "functions can store only inside variables: dest_address_type: {}",
@@ -1187,21 +1187,17 @@ fn store_function_variable(
         calc_function_expression(
             location, fn_vars, nodes, call_stack)
         .must_const_usize(nodes, call_stack);
-    if store_bucket.context.size == 1 {
-        fn_vars[lvar_idx] = Some(calc_function_expression(
-            &store_bucket.src, fn_vars, nodes,
-            call_stack));
-    } else {
-        let values = calc_function_expression_n(
-            &store_bucket.src, fn_vars, nodes,
-            store_bucket.context.size, call_stack);
-        assert_eq!(values.len(), store_bucket.context.size);
-        for i in 0..store_bucket.context.size {
-            fn_vars[lvar_idx + i] = Some(values[i].clone());
-        }
-    }
 
-    panic!("not implemented");
+    assert_eq!(
+        store_bucket.context.size, 1,
+        "variable size in ternary expression must be 1: {}, {}",
+        template_header.as_ref().unwrap_or(&"-".to_string()),
+        call_stack.join(" -> "));
+
+    let v = calc_function_expression(
+        &store_bucket.src, fn_vars, nodes, call_stack);
+
+    (v, lvar_idx)
 }
 
 fn process_function_instruction(
@@ -1251,48 +1247,78 @@ fn process_function_instruction(
         }
         Instruction::Branch(ref branch_bucket) => {
             // println!("branch bucket: {}", branch_bucket.to_string());
+
             let cond = calc_function_expression(
                 &branch_bucket.cond, fn_vars, nodes, call_stack);
+            let cond_const = cond.to_const(nodes);
 
-            let cond_int = cond.to_const(nodes);
-            // match cond_int {
-            //     None => {}
-            //     Some(v) => {
-            //         let instructions = if v == U256::ZERO {
-            //             &branch_bucket.else_branch
-            //         } else {
-            //             &branch_bucket.if_branch
-            //         };
-            //         for i in instructions {
-            //             let r = process_function_instruction(
-            //                 i, fn_vars, nodes, functions, print_debug, call_stack);
-            //             if r.is_some() {
-            //                 return r;
-            //             }
-            //         }
-            //     }
-            // }
-
-            let cond2 = cond_int.unwrap_or_else(
-                |e| panic!(
-                    "condition is not a constant: {}: {}",
-                    e, call_stack.join(" -> ")));
-
-            if cond2.gt(&U256::ZERO) {
-                for i in &branch_bucket.if_branch {
-                    let r = process_function_instruction(
-                        i, fn_vars, nodes, functions, print_debug, call_stack);
-                    if r.is_some() {
-                        return r;
+            match cond_const {
+                Ok(cond_const) => { // condition expression is static
+                    let branch = if cond_const.gt(&U256::ZERO) {
+                        &branch_bucket.if_branch
+                    } else {
+                        &branch_bucket.else_branch
+                    };
+                    for i in branch {
+                        let r = process_function_instruction(
+                            i, fn_vars, nodes, functions, print_debug, call_stack);
+                        if r.is_some() {
+                            return r;
+                        }
                     }
                 }
-            } else {
-                for i in &branch_bucket.else_branch {
-                    let r = process_function_instruction(
-                        i, fn_vars, nodes, functions, print_debug, call_stack);
-                    if r.is_some() {
-                        return r;
-                    }
+                Err(NodeConstErr::InputSignal) => { // dynamic condition expression
+                    // The only supported dynamic condition is a ternary operation
+                    // Both branches should be exactly one operation of
+                    // storing a variable to the same signal index.
+                    assert_eq!(
+                        branch_bucket.if_branch.len(), 1,
+                        "expected a ternary operation but it doesn't looks like one as the 'if' branch is not of length 1: {}: {}",
+                        branch_bucket.else_branch.len(),
+                        call_stack.join(" -> "));
+                    assert_eq!(
+                        branch_bucket.else_branch.len(), 1,
+                        "expected a ternary operation but it doesn't looks like one as the 'else' branch is not of length 1: {}: {}",
+                        branch_bucket.else_branch.len(),
+                        call_stack.join(" -> "));
+                    let (var_if, var_if_idx) = match *branch_bucket.if_branch[0] {
+                        Instruction::Store(ref store_bucket) => {
+                            store_function_variable(
+                                store_bucket, fn_vars, nodes, call_stack)
+                        }
+                        _ => {
+                            panic!(
+                                "expected store operation in ternary operation of branch 'if': {}",
+                                call_stack.join(" -> "));
+                        }
+                    };
+                    let (var_else, var_else_idx) = match *branch_bucket.else_branch[0] {
+                        Instruction::Store(ref store_bucket) => {
+                            store_function_variable(
+                                store_bucket, fn_vars, nodes, call_stack)
+                        }
+                        _ => {
+                            panic!(
+                                "expected store operation in ternary operation of branch 'else': {}",
+                                call_stack.join(" -> "));
+                        }
+                    };
+                    assert_eq!(
+                        var_if_idx, var_else_idx,
+                        "in ternary operation if and else branches must store to the same variable");
+
+                    let cond_node_idx = node_from_var(&cond, nodes);
+                    let if_node_idx = node_from_var(&var_if, nodes);
+                    let else_node_idx = node_from_var(&var_else, nodes);
+                    let tern_node_idx = nodes.push(Node::TresOp(
+                        TresOperation::TernCond, cond_node_idx, if_node_idx,
+                        else_node_idx));
+                    fn_vars[var_if_idx] = Some(Var::Node(tern_node_idx.0));
+                }
+                Err(e) => {
+                    panic!(
+                        "error calculating function branch condition: {}: {}",
+                        e, call_stack.join(" -> "));
                 }
             }
             None
@@ -1343,7 +1369,8 @@ fn process_function_instruction(
                     }
                     // assert_eq!(final_data.context.size, r.ln);
                     store_function_return_results_into_variable(
-                        final_data, &new_fn_vars, &r, fn_vars);
+                        final_data, &new_fn_vars, &r, fn_vars, nodes,
+                        call_stack);
                 }
             };
             None
@@ -1729,6 +1756,7 @@ fn build_binary_op_var(
                 OperatorType::Mod => Operation::Mod.eval(a.clone(), b.clone()),
                 OperatorType::ShiftL => Operation::Shl.eval(a.clone(), b.clone()),
                 OperatorType::ShiftR => Operation::Shr.eval(a.clone(), b.clone()),
+                OperatorType::LesserEq => Operation::Leq.eval(a.clone(), b.clone()),
                 OperatorType::GreaterEq => Operation::Geq.eval(a.clone(), b.clone()),
                 OperatorType::Lesser => if a < b { U256::from(1) } else { U256::ZERO }
                 OperatorType::Greater => Operation::Gt.eval(a.clone(), b.clone()),
@@ -1759,6 +1787,7 @@ fn build_binary_op_var(
                 OperatorType::Mod => Operation::Mod,
                 OperatorType::ShiftL => Operation::Shl,
                 OperatorType::ShiftR => Operation::Shr,
+                OperatorType::LesserEq => Operation::Leq,
                 OperatorType::GreaterEq => Operation::Geq,
                 OperatorType::Lesser => Operation::Lt,
                 OperatorType::Greater => Operation::Gt,
@@ -1813,11 +1842,11 @@ fn calc_expression(
             OperatorType::Mul | OperatorType::Div | OperatorType::Add
             | OperatorType::Sub | OperatorType::Pow | OperatorType::IntDiv
             | OperatorType::Mod | OperatorType::ShiftL | OperatorType::ShiftR
-            | OperatorType::GreaterEq | OperatorType::Lesser
-            | OperatorType::Greater | OperatorType::Eq(1) | OperatorType::NotEq
-            | OperatorType::BoolAnd | OperatorType::BitOr | OperatorType::BitAnd
-            | OperatorType::BitXor | OperatorType::MulAddress
-            | OperatorType::AddAddress => {
+            | OperatorType::LesserEq | OperatorType::GreaterEq
+            | OperatorType::Lesser | OperatorType::Greater | OperatorType::Eq(1)
+            | OperatorType::NotEq | OperatorType::BoolAnd | OperatorType::BitOr
+            | OperatorType::BitAnd | OperatorType::BitXor
+            | OperatorType::MulAddress | OperatorType::AddAddress => {
                 build_binary_op_var(
                     compute_bucket, nodes, vars, component_signal_start,
                     signal_node_idx, subcomponents, io_map, print_debug,
@@ -2187,12 +2216,17 @@ fn main() {
         circuit.c_producer.get_io_map(), args.print_debug, &vec![]);
 
     for (idx, i) in signal_node_idx.iter().enumerate() {
-        assert_ne!(i.clone(), usize::MAX, "signal #{} is not set", idx);
+        if *i == usize::MAX {
+            println!("[warning] signal #{} is not set", idx);
+        }
     }
 
-    let mut signals = witness_list
-        .iter()
-        .map(|&i| signal_node_idx[i])
+    let mut witness_node_idxes = witness_list
+        .iter().enumerate()
+        .map(|(idx, i)| {
+            assert_ne!(*i, usize::MAX, "signal #{} is not set", idx);
+            signal_node_idx[*i]
+        })
         .collect::<Vec<_>>();
 
     if args.print_unoptimized {
@@ -2200,15 +2234,15 @@ fn main() {
         evaluate_unoptimized(&nodes, &input_signal_values, &signal_node_idx, &witness_list);
     }
 
-    println!("number of nodes {}, signals {}", nodes.len(), signals.len());
+    println!("number of nodes {}, signals {}", nodes.len(), witness_node_idxes.len());
 
-    optimize(&mut nodes.0, &mut signals);
+    optimize(&mut nodes.0, &mut witness_node_idxes);
 
     println!(
         "number of nodes after optimize {}, signals {}",
-        nodes.len(), signals.len());
+        nodes.len(), witness_node_idxes.len());
 
-    let bytes = postcard::to_stdvec(&(&nodes.0, &signals, &input_signals)).unwrap();
+    let bytes = postcard::to_stdvec(&(&nodes.0, &witness_node_idxes, &input_signals)).unwrap();
     fs::write(&args.graph_file, bytes).unwrap();
 
     println!("circuit graph saved to file: {}", &args.graph_file)
@@ -2217,7 +2251,14 @@ fn main() {
 fn evaluate_unoptimized(nodes: &Nodes, inputs: &[U256], signal_node_idx: &Vec<usize>, witness_signals: &[usize]) {
     let mut node_idx_to_signal: HashMap<usize, Vec<usize>> = HashMap::new();
     for (signal_idx, &node_idx) in signal_node_idx.iter().enumerate() {
-        node_idx_to_signal.entry(node_idx).and_modify(|v| v.push(signal_idx)).or_insert(vec![signal_idx]);
+        if node_idx == usize::MAX {
+            // signal was not set
+            continue;
+        }
+        node_idx_to_signal
+            .entry(node_idx)
+            .and_modify(|v| v.push(signal_idx))
+            .or_insert(vec![signal_idx]);
     }
 
     let mut signal_to_witness: HashMap<usize, Vec<usize>> = HashMap::new();
