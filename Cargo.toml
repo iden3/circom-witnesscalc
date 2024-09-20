@@ -12,7 +12,6 @@ ark-ff = { version = "0.4.0", features = ["std"] }
 ark-serialize = { version = "0.4", features = ["derive"] }
 byteorder = "1.4.3"
 hex = "0.4.3"
-postcard = { version = "1.0.8", features = ["use-std"], default-features = false }
 rand = "0.8.5"
 ruint = { version = "1.10.0", features = ["rand", "serde", "ark-ff-04"] }
 serde = { version = "1.0.190", features = ["derive"] }
@@ -34,6 +33,7 @@ parser = { git = "https://github.com/olomix/circom.git", branch = "master" }
 type_analysis = { git = "https://github.com/olomix/circom.git", branch = "master" }
 constraint_generation = { git = "https://github.com/olomix/circom.git", branch = "master" }
 prost = "0.13.1"
+num-bigint = "0.4.6"
 
 
 [profile.release]

@@ -4,7 +4,7 @@
 // #[allow(dead_code)]
 mod field;
 pub mod graph;
-mod storage;
+pub mod storage;
 
 use std::collections::HashMap;
 use std::ffi::{c_void, c_char, c_int, CStr};
@@ -14,6 +14,7 @@ use ruint::ParseError;
 use crate::graph::Node;
 use wtns_file::FieldElement;
 use crate::field::M;
+use crate::storage::deserialize_witnesscalc_graph;
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
@@ -118,7 +119,7 @@ pub fn calc_witness(inputs: &str, graph_data: &[u8]) -> Result<Vec<U256>, Error>
     let inputs = deserialize_inputs(inputs.as_bytes())?;
 
     let (nodes, signals, input_mapping): (Vec<Node>, Vec<usize>, InputSignalsInfo) =
-        postcard::from_bytes(graph_data).unwrap();
+        deserialize_witnesscalc_graph(std::io::Cursor::new(graph_data)).unwrap();
 
     let mut inputs_buffer = get_inputs_buffer(get_inputs_size(&nodes));
     populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);

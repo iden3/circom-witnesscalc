@@ -16,6 +16,7 @@ use lazy_static::lazy_static;
 use type_analysis::check_types::check_types;
 use circom_witnesscalc::{deserialize_inputs, InputSignalsInfo};
 use circom_witnesscalc::graph::{optimize, Node, Operation, UnoOperation, TresOperation, Nodes, NodeConstErr, NodeIdx};
+use circom_witnesscalc::storage::serialize_witnesscalc_graph;
 
 pub const M: U256 =
     uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U256);
@@ -2242,8 +2243,8 @@ fn main() {
         "number of nodes after optimize {}, signals {}",
         nodes.len(), witness_node_idxes.len());
 
-    let bytes = postcard::to_stdvec(&(&nodes.0, &witness_node_idxes, &input_signals)).unwrap();
-    fs::write(&args.graph_file, bytes).unwrap();
+    let f = fs::File::create(&args.graph_file).unwrap();
+    serialize_witnesscalc_graph(f, &nodes, &witness_node_idxes, &input_signals).unwrap();
 
     println!("circuit graph saved to file: {}", &args.graph_file)
 }
