@@ -45,5 +45,5 @@ codegen-units = 1
 crate-type = ["lib", "staticlib", "cdylib"]
 
 [build-dependencies]
-bindgen = "0.69.4"
-prost-build = "0.13.1"
+bindgen = "0.70.1"
+prost-build = "0.13.3"

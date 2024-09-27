@@ -82,3 +82,20 @@ cargo build --target aarch64-apple-ios-sim --release
 install_name_tool -id @rpath/libcircom_witnesscalc.dylib $PWD/target/aarch64-apple-ios/release/libcircom_witnesscalc.dylib
 install_name_tool -id @rpath/libcircom_witnesscalc.dylib $PWD/target/aarch64-apple-ios-sim/release/libcircom_witnesscalc.dylib
 ```
+
+## Build for Android
+
+You should have ANDROID_NDK_ROOT environment variable set to the path to the Android NDK.
+It may be somewhere like `~/Library/Android/sdk/ndk/26.2.11394342`.
+
+```shell
+CC=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android29-clang \
+CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC} \
+CLANG_PATH=${CC} \
+cargo build --target aarch64-linux-android --release
+
+CC=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android29-clang \
+CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${CC} \
+CLANG_PATH=${CC} \
+cargo build --target x86_64-linux-android --release
+```

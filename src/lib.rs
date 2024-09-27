@@ -221,7 +221,7 @@ pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256
                             U256::from(n.as_u64().unwrap())
                         }
                         _ => {
-                            return Err(Error::InputsUnmarshal("inputs must be a string".to_string()));
+                            return Err(Error::InputsUnmarshal(format!("inputs must be a string: {}", k).to_string()));
                         }
                     };
                     vals.push(i);
