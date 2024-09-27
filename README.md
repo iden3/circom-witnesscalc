@@ -73,3 +73,12 @@ Now run the `test_circuits.sh` script.
 ```shell
 ./test_circuits.sh
 ```
+
+## Build for iOS & iOS Simulator
+
+```shell
+cargo build --target aarch64-apple-ios --release
+cargo build --target aarch64-apple-ios-sim --release
+install_name_tool -id @rpath/libcircom_witnesscalc.dylib $PWD/target/aarch64-apple-ios/release/libcircom_witnesscalc.dylib
+install_name_tool -id @rpath/libcircom_witnesscalc.dylib $PWD/target/aarch64-apple-ios-sim/release/libcircom_witnesscalc.dylib
+```

@@ -83,13 +83,3 @@ message GraphMetadata {
   repeated uint32 witnessSignals = 1;
   map<string, SignalDescription> inputs = 2;
 }
-
-message InputSignalsDescriptions {
-  map<string, SignalDescription> inputs = 1;
-}
-
-//message WitnessContainer {
-//  repeated Node graph = 1;
-//  repeated uint32 witness = 2;
-//  map<string, SignalDescription> signals = 3;
-//}
