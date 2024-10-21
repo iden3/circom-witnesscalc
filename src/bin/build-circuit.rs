@@ -2058,7 +2058,7 @@ fn run_template(
     for inst in &tmpl.body {
         process_instruction(
             &inst, nodes, signal_node_idx, &mut vars, &mut components,
-            templates, template_id, functions, component_signal_start, io_map, print_debug,
+            templates, functions, component_signal_start, io_map, print_debug,
             &call_stack);
     }
 
