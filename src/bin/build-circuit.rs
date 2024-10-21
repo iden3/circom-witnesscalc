@@ -100,7 +100,6 @@ fn operator_argument_instruction_n(
     component_signal_start: usize,
     subcomponents: &Vec<Option<ComponentInstance>>,
     size: usize,
-    current_template_id: usize,
     io_map: &TemplateInstanceIOMap,
     print_debug: bool,
     call_stack: &Vec<String>,
@@ -458,17 +457,12 @@ fn node_from_compute_bucket(
 
 fn calc_mapped_signal_idx(
     subcomponents: &Vec<Option<ComponentInstance>>,
-    subcomponent_idx: usize,
-    io_map: &TemplateInstanceIOMap,
-    signal_code: usize,
-    indexes: &Vec<InstructionPointer>,
-    nodes: &mut Nodes,
-    vars: &mut Vec<Option<Var>>,
-    component_signal_start: usize,
-    signal_node_idx: &mut Vec<usize>,
-    print_debug: bool,
-    call_stack: &Vec<String>,
-) -> (usize, String) {
+    subcomponent_idx: usize, io_map: &TemplateInstanceIOMap, signal_code: usize,
+    indexes: &Vec<InstructionPointer>, nodes: &mut Nodes,
+    vars: &mut Vec<Option<Var>>, component_signal_start: usize,
+    signal_node_idx: &mut Vec<usize>, print_debug: bool,
+    call_stack: &Vec<String>) -> (usize, String) {
+
     let template_id = &subcomponents[subcomponent_idx]
         .as_ref()
         .unwrap()
@@ -480,6 +474,7 @@ fn calc_mapped_signal_idx(
 
     if !indexes.is_empty() {
         let lengths = &def.lengths;
+        // I'm not sure if this assert should be here.
         assert_eq!(
             lengths.len(),
             indexes.len(),
@@ -495,16 +490,8 @@ fn calc_mapped_signal_idx(
         // Calculate linear index
         for (i, idx_ip) in indexes.iter().enumerate() {
             let idx_value = calc_expression(
-                idx_ip,
-                nodes,
-                vars,
-                component_signal_start,
-                signal_node_idx,
-                subcomponents,
-                io_map,
-                print_debug,
-                call_stack,
-            );
+                idx_ip, nodes, vars, component_signal_start, signal_node_idx,
+                subcomponents, io_map, print_debug, call_stack);
             let idx_value = idx_value.must_const_usize(nodes, call_stack);
 
             // Ensure index is within bounds
@@ -529,7 +516,6 @@ fn process_instruction(
     vars: &mut Vec<Option<Var>>,
     subcomponents: &mut Vec<Option<ComponentInstance>>,
     templates: &Vec<TemplateCode>,
-    template_id: usize,
     functions: &Vec<FunctionCode>,
     component_signal_start: usize,
     io_map: &TemplateInstanceIOMap,
@@ -573,7 +559,7 @@ fn process_instruction(
                             let node_idxs = operator_argument_instruction_n(
                                 &store_bucket.src, nodes, signal_node_idx, vars,
                                 component_signal_start, subcomponents,
-                                store_bucket.context.size, template_id, io_map, print_debug,
+                                store_bucket.context.size, io_map, print_debug,
                                 call_stack);
 
                             assert_eq!(node_idxs.len(), store_bucket.context.size);
@@ -632,7 +618,7 @@ fn process_instruction(
                     let node_idxs = operator_argument_instruction_n(
                         &store_bucket.src, nodes, signal_node_idx, vars,
                         component_signal_start, subcomponents,
-                        store_bucket.context.size, template_id, io_map, print_debug,
+                        store_bucket.context.size, io_map, print_debug,
                         call_stack);
                     assert_eq!(node_idxs.len(), store_bucket.context.size);
 
@@ -699,7 +685,7 @@ fn process_instruction(
                     for inst in inst_list {
                         process_instruction(
                             inst, nodes, signal_node_idx, vars, subcomponents,
-                            templates, template_id, functions, component_signal_start,
+                            templates, functions, component_signal_start,
                             io_map, print_debug, call_stack);
                     }
                 }
@@ -782,7 +768,7 @@ fn process_instruction(
                 for i in &loop_bucket.body {
                     process_instruction(
                         i, nodes, signal_node_idx, vars, subcomponents,
-                        templates, template_id, functions, component_signal_start, io_map,
+                        templates, functions, component_signal_start, io_map,
                         print_debug, call_stack);
                 }
             }
@@ -1734,7 +1720,7 @@ fn build_unary_op_var(
                 OperatorType::ToAddress => {
                     nodes.to_const(NodeIdx(*node_idx)).unwrap_or_else(|e| {
                         panic!(
-                            "ToAddress argument is not a constant: {}: {}", // panicking here
+                            "ToAddress argument is not a constant: {}: {}",
                             e.to_string(), call_stack.join(" -> "));
                     });
                     UnoOperation::Id
