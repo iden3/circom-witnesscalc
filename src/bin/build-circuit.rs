@@ -1,4 +1,4 @@
-use compiler::circuit_design::template::{TemplateCode};
+use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config};
 use compiler::intermediate_representation::ir_interface::{AddressType, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, OperatorType, ReturnBucket, ReturnType, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
@@ -463,21 +463,47 @@ fn calc_mapped_signal_idx(
     signal_node_idx: &mut Vec<usize>, print_debug: bool,
     call_stack: &Vec<String>) -> (usize, String) {
 
-    let template_id = &subcomponents[subcomponent_idx].as_ref().unwrap().template_id;
+    let template_id = &subcomponents[subcomponent_idx]
+        .as_ref()
+        .unwrap()
+        .template_id;
     let signals = io_map.get(template_id).unwrap();
     let template_def = format!("<template id: {}>", template_id);
     let def: &IODef = &signals[signal_code];
     let mut map_access = def.offset;
 
-    if indexes.len() > 0 {
-        if indexes.len() > 1 {
-            todo!("not implemented yet");
+    if !indexes.is_empty() {
+        let lengths = &def.lengths;
+        // I'm not sure if this assert should be here.
+        assert_eq!(
+            lengths.len(),
+            indexes.len(),
+            "Number of indexes does not match the number of dimensions"
+        );
+
+        // Compute strides
+        let mut strides = vec![1usize; lengths.len()];
+        for i in (0..lengths.len() - 1).rev() {
+            strides[i] = strides[i + 1] * lengths[i + 1];
         }
-        let map_index = calc_expression(
-            &indexes[0], nodes, vars, component_signal_start,
-            signal_node_idx, subcomponents, io_map, print_debug, call_stack);
-        let map_index = map_index.must_const_usize(nodes, call_stack);
-        map_access += map_index;
+
+        // Calculate linear index
+        for (i, idx_ip) in indexes.iter().enumerate() {
+            let idx_value = calc_expression(
+                idx_ip, nodes, vars, component_signal_start, signal_node_idx,
+                subcomponents, io_map, print_debug, call_stack);
+            let idx_value = idx_value.must_const_usize(nodes, call_stack);
+
+            // Ensure index is within bounds
+            assert!(
+                idx_value < lengths[i],
+                "Index out of bounds: index {} >= dimension size {}",
+                idx_value,
+                lengths[i]
+            );
+
+            map_access += idx_value * strides[i];
+        }
     }
 
     (map_access, template_def)

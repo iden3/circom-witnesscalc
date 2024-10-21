@@ -37,8 +37,12 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
     }
 }
 
+/// # Safety
+/// 
+/// This function is unsafe because it dereferences raw pointers and can cause
+/// undefined behavior if misused.
 #[no_mangle]
-pub extern "C" fn gw_calc_witness(
+pub unsafe extern "C" fn gw_calc_witness(
     inputs: *const c_char,
     graph_data: *const c_void, graph_data_len: usize,
     wtns_data: *mut *mut c_void, wtns_len: *mut usize,
@@ -92,6 +96,10 @@ pub extern "C" fn gw_calc_witness(
     unsafe {
         *wtns_len = witness_data.len();
         *wtns_data = libc::malloc(witness_data.len()) as *mut c_void;
+        if (*wtns_data).is_null() {
+            prepare_status(status, GW_ERROR_CODE_ERROR, "Failed to allocate memory for wtns_data");
+            return 1;
+        }
         libc::memcpy(*wtns_data, witness_data.as_ptr() as *const c_void, witness_data.len());
     }
 
