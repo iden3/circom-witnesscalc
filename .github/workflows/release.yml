@@ -38,6 +38,9 @@ jobs:
       - name: Lint
         run: cargo clippy --all-targets --all-features --workspace
 
+      - name: Run tests
+        run: cargo test --all-targets --all-features --workspace
+
 #      - name: Install Rust
 #        uses: actions-rs/toolchain@v1
 #        with:
