@@ -17,6 +17,10 @@ jobs:
         run: |
           rustc --version
           cargo --version
+
+      - name: Install targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-apple-ios x86_64-linux-android
           rustup target list --installed
 
       - name: Try to build everyting
