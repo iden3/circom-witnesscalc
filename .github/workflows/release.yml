@@ -13,6 +13,9 @@ jobs:
         with:
           submodules: recursive
 
+      - name: Try to restore Rust artifacts from the cache
+        uses: tecolicom/actions-use-homebrew-tools@v1
+
       - name: Check Rust version
         run: |
           rustc --version
@@ -31,6 +34,9 @@ jobs:
       - name: Try to build everyting
         run: |
           make all
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --workspace
 
 #      - name: Install Rust
 #        uses: actions-rs/toolchain@v1
