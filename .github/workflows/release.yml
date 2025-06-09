@@ -19,6 +19,10 @@ jobs:
           cargo --version
           rustup target list --installed
 
+      - name: Try to build everyting
+        run: |
+          make all
+
 #      - name: Install Rust
 #        uses: actions-rs/toolchain@v1
 #        with:

@@ -26,7 +26,7 @@ lib-android-x86_64:
 	cargo build --target x86_64-linux-android --release
 
 lib-macos:
-	cargo build --target aarch64-apple-darwin --release
+	cargo build --target aarch64-apple-darwin --release --workspace
 
 copy-libs:
 	mkdir -p \
