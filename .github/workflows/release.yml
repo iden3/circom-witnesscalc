@@ -14,7 +14,7 @@ jobs:
           submodules: recursive
 
       - name: Try to restore Rust artifacts from the cache
-        uses: tecolicom/actions-use-homebrew-tools@v1
+        uses: Swatinem/rust-cache@v2
 
       - name: Check Rust version
         run: |
