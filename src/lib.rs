@@ -35,9 +35,10 @@ pub mod proto {
     }
 }
 
+#[cfg(feature="c_bindings")]
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-// include!("bindings.rs");
 
+#[cfg(feature="c_bindings")]
 fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
     if !status.is_null() {
         let bs = error_msg.as_bytes();
@@ -55,6 +56,7 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
 /// This function is unsafe because it dereferences raw pointers and can cause
 /// undefined behavior if misused.
 #[no_mangle]
+#[cfg(feature="c_bindings")]
 pub unsafe extern "C" fn gw_calc_witness(
     inputs: *const c_char,
     graph_data: *const c_void, graph_data_len: usize,

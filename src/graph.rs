@@ -6,6 +6,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::ops::{BitOr, BitXor, Not};
 use std::path::{Path, PathBuf};
+#[cfg(all(not(target_arch = "wasm32")))]
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
@@ -910,6 +911,7 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 {
     // assert_valid(nodes);
 
+    #[cfg(all(not(target_arch = "wasm32")))]
     let start = Instant::now();
     // Evaluate the graph.
     let mut values = Vec::with_capacity(nodes.len());
@@ -937,6 +939,7 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
     }
 
     let r = outputs.iter().map(|&i| values[i]).collect();
+    #[cfg(all(not(target_arch = "wasm32")))]
     println!("generic typed graph calculated in {:?}", start.elapsed());
     r
 }

@@ -2034,6 +2034,7 @@ struct Args {
     print_debug: bool,
     prime: Prime,
     r1cs: Option<String>,
+    sym: Option<String>,
     optimization_level: Option<OptimizationLevel>,
     named_temp: bool,
     temp_dir: PathBuf,
@@ -2045,9 +2046,9 @@ fn parse_args() -> Args {
     let mut circuit_file: Option<String> = None;
     let mut graph_file: Option<String> = None;
     let mut link_libraries: Vec<PathBuf> = Vec::new();
-    let mut inputs_file: Option<String> = None;
     let mut print_debug = false;
     let mut r1cs_file: Option<String> = None;
+    let mut sym_file: Option<String> = None;
     let mut prime: Option<Prime> = None;
     let mut optimization_level: Option<OptimizationLevel> = None;
     let mut named_temp: bool = false;
@@ -2070,10 +2071,9 @@ fn parse_args() -> Args {
         eprintln!("    -h | --help             Display this help message");
         eprintln!("    -l <link_libraries>...  Adds directory to library search path.");
         eprintln!("                            Can be used multiple times.");
-        eprintln!("    -i <inputs_file.json>   Path to the inputs file. If provided, the inputs will be used");
-        eprintln!("                            to generate the witness. Otherwise, inputs will be set to 0");
         eprintln!("    -p <prime>              The prime field to use. Valid options are 'bn128' (default),");
         eprintln!("                            'goldilocks', and 'grumpkin'");
+        eprintln!("    --sym <sym_file>        Path to the .sym file.");
         eprintln!("    --r1cs <r1cs_file>      Path to the R1CS file. If provided, the R1CS file will be");
         eprintln!("                            saved along with the generated graph");
         eprintln!("    --O0, --O1, --O2        Optimization level for circom. Default is --O2");
@@ -2101,22 +2101,6 @@ fn parse_args() -> Args {
             usage("");
         } else if args[i].starts_with("-l") {
             link_libraries.push(args[i][2..].to_string().into())
-        } else if args[i] == "-i" {
-            i += 1;
-            if i >= args.len() {
-                usage("missing argument for -i");
-            }
-            if inputs_file.is_none() {
-                inputs_file = Some(args[i].clone());
-            } else {
-                usage("multiple inputs files");
-            }
-        } else if args[i].starts_with("-i") {
-            if inputs_file.is_none() {
-                inputs_file = Some(args[i][2..].to_string());
-            } else {
-                usage("multiple inputs files");
-            }
         } else if args[i] == "-v" {
             print_debug = true;
         } else if args[i] == "--r1cs" {
@@ -2128,6 +2112,15 @@ fn parse_args() -> Args {
                 usage("multiple r1cs files");
             }
             r1cs_file = Some(args[i].clone());
+        } else if args[i] == "--sym" {
+            i += 1;
+            if i >= args.len() {
+                usage("missing argument for --sym");
+            }
+            if sym_file.is_some() {
+                usage("multiple sym files");
+            }
+            sym_file = Some(args[i].clone());
         } else if args[i] == "--O0" {
             if optimization_level.is_some() {
                 usage("multiple optimization levels set");
@@ -2190,6 +2183,7 @@ fn parse_args() -> Args {
         print_debug,
         prime: prime.unwrap_or(Prime::Bn128),
         r1cs: r1cs_file,
+        sym: sym_file,
         optimization_level,
         named_temp,
         temp_dir: temp_dir.unwrap_or_else(env::temp_dir),
@@ -2270,6 +2264,15 @@ fn main() {
                 r1cs_file);
         }
         println!("R1CS written successfully: {}", r1cs_file);
+    }
+
+    if let Some(sym_file) = &args.sym {
+        if cw.sym(sym_file).is_err() {
+            panic!(
+                "Could not write the symbol output in the given path: {}",
+                sym_file);
+        }
+        println!(".sym written successfully: {}", sym_file);
     }
 
     let circuit = run_compiler(

@@ -1,6 +1,6 @@
 [package]
 name = "circom-witnesscalc"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 repository = "https://github.com/iden3/circom-witnesscalc"
 authors = ["Oleh Lomaka <oleg.lomaka@gmail.com>"]
@@ -10,6 +10,11 @@ license = "MIT OR Apache-2.0"
 [features]
 default = []
 print_opcode = []
+c_bindings = []
+
+# Target-specific defaults - only enable c_bindings for non-WASM
+[target.'cfg(not(target_arch = "wasm32"))'.features]
+default = ["c_bindings"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

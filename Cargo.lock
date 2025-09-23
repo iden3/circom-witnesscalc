@@ -437,7 +437,7 @@ dependencies = [
 
 [[package]]
 name = "build-circuit"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "circom-witnesscalc",
@@ -492,7 +492,7 @@ checksum = "baf1de4339761588bc0619e3cbc0120ee582ebb74b53b4efbf79117bd2da40fd"
 
 [[package]]
 name = "circom-witnesscalc"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "ark-bn254",
