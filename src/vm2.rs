@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, ops::Div};
 use std::error::Error;
 #[cfg(feature = "parallel_components")]
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
@@ -82,6 +82,12 @@ pub enum OpCode {
     // stack_i64:-1 contains the source address
     // stack_i64:-2 contains the destination address
     FfMReturn            = 26,
+    // Memory return operation
+    // Copy data from source memory to destination memory
+    // stack_i64:0 contains the size (number of elements)
+    // stack_i64:-1 contains the source address
+    // stack_i64:-2 contains the destination address
+    I64MReturn            = 89,
     // Function call operation
     // arguments: 4-byte function index + 1-byte argument count
     // Then for each argument:
@@ -107,6 +113,16 @@ pub enum OpCode {
     // stack_i64:0 contains the memory address
     // Result pushed to stack_i64
     I64Load              = 30,
+    // Return from call, passing an i64 value (i64.return)
+    // stack_i64:0 contains the return value
+    // Restores caller's execution context and pushes value to caller's stack_i64
+    I64Return              = 88,
+    // Store i64 value (i64.store)
+    // stack_i64:0  contains right operand  (address)
+    // stack_i64:-1 contains left operand   (value)
+    // Effect: memory_i64[address] = value
+    // No value is pushed to stack_i64
+    I64Store              = 86,
     // Field less-than comparison (ff.lt)
     // stack_ff:0 contains right operand
     // stack_ff:-1 contains left operand
@@ -122,6 +138,31 @@ pub enum OpCode {
     // stack_i64:-1 contains left operand
     // Result pushed to stack_i64
     OpI64Mul             = 33,
+    // Integer division (i64.div)
+    // stack_i64:0 contains right operand
+    // stack_i64:-1 contains left operand
+    // Result pushed to stack_i64
+    OpI64Div             = 74,
+    // Bitwise AND (i64.and)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left & right) pushed to stack_i64
+    OpI64And             = 75,
+    // Bitwise OR (i64.or)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left | right) is pushed to stack_i64
+    OpI64Or             = 76,
+    // Integer exponentiation (i64.pow)
+    // stack_i64:0  contains right operand (exponent)
+    // stack_i64:-1 contains left operand  (base)
+    // Result (base ^ exponent) is pushed to stack_i64
+    OpI64Pow             = 78,
+    // Integer remainder (i64.rem)
+    // stack_i64:0  contains right operand  (divisor)
+    // stack_i64:-1 contains left operand   (numerator)
+    // Result (left % right) is pushed to stack_i64
+    OpI64Rem             = 79,
     // Integer less-than-or-equal comparison (i64.le)
     // stack_i64:0 contains right operand
     // stack_i64:-1 contains left operand
@@ -132,6 +173,35 @@ pub enum OpCode {
     // stack_i64:-1 contains left operand
     // Result pushed to stack_i64 (1 if lhs < rhs, 0 otherwise)
     OpI64Lt = 70,
+    // Left shift (i64.shl)
+    // stack_i64:0  contains right operand  (shift amount)
+    // stack_i64:-1 contains left operand   (value)
+    // Result (value << shift) is pushed to stack_i64
+    OpI64Shl             = 80,
+    // Arithmetic right shift (i64.shr)
+    // stack_i64:0  contains right operand  (shift amount)
+    // stack_i64:-1 contains left operand   (value)
+    // Result (value >> shift) is pushed to stack_i64
+    OpI64Shr             = 81,
+    // Bitwise NOT (i64.bnot)
+    // stack_i64:0 contains the operand
+    // Result (~value) is pushed to stack_i64
+    OpI64BNot            = 82,
+    // Bitwise XOR (i64.bxor)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left ^ right) is pushed to stack_i64
+    OpI64BXor            = 83,
+    // Bitwise OR (i64.bor)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left | right) is pushed to stack_i64
+    OpI64BOr             = 84,
+    // Bitwise AND (i64.band)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left & right) is pushed to stack_i64
+    OpI64BAnd            = 85,
     // Wrap field element to i64 (i64.wrap_ff)
     // stack_ff:0 contains the field element
     // Result pushed to stack_i64
@@ -184,6 +254,10 @@ pub enum OpCode {
     // Return from function with single field element
     // stack_ff:0 contains the return value
     FfReturn             = 44,
+    // Convert i64 to field element (ff.extend_i64)
+    // stack_i64:0 contains the operand (i64)
+    // Result (FF(value)) is pushed to stack_ff
+    FfExtendI64             = 87,
     // Bitwise XOR operation for field elements
     // stack_ff:0 contains rhs
     // stack_ff:-1 contains lhs
@@ -277,6 +351,11 @@ pub enum OpCode {
     GetBusSignalPosition = 64,
     GetBusSignalSize = 65,
     OpI64Eq = 66,
+    // Inequality comparison (i64.neq)
+    // stack_i64:0  contains right operand
+    // stack_i64:-1 contains left operand
+    // Result (left != right ? 1 : 0) is pushed to stack_i64
+    OpI64Neq = 77,
     FfMStoreFromCmpSignal = 67,
     GetBusSignalType = 68,
     GetBusSignalDimension = 69,
@@ -533,6 +612,8 @@ pub enum RuntimeError {
     SignalIdOutOfBounds(usize, usize),
     #[error("Dimension index {0} is out of bounds (signal has {1} dimensions)")]
     DimensionIndexOutOfBounds(usize, usize),
+    #[error("Attempt divide by zero")]
+    AttemptDivideByZeroComponent,
 }
 
 #[derive(Debug, Clone)]
@@ -1147,11 +1228,47 @@ where
         OpCode::OpI64Sub => {
             output.push_str("OpI64Sub");
         }
+        OpCode::OpI64Div => {
+            output.push_str("OpI64Div");
+        }
+        OpCode::OpI64Pow => {
+            output.push_str("OpI64Pow");
+        }
+        OpCode::OpI64Rem => {
+            output.push_str("OpI64Rem");
+        }
+        OpCode::OpI64And => {
+            output.push_str("OpI64And");
+        }
+        OpCode::OpI64Or => {
+            output.push_str("OpI64Or");
+        }
+        OpCode::OpI64Shl => {
+            output.push_str("OpI64Shl");
+        }
+        OpCode::OpI64Shr => {
+            output.push_str("OpI64Shr");
+        }
+        OpCode::OpI64BNot => {
+            output.push_str("OpI64BNot");
+        }
+        OpCode::OpI64BXor => {
+            output.push_str("OpI64BXor");
+        }
+        OpCode::OpI64BOr => {
+            output.push_str("OpI64BOr");
+        }
+        OpCode::OpI64BAnd => {
+            output.push_str("OpI64BAnd");
+        }
         OpCode::Error => {
             output.push_str("Error");
         }
         OpCode::FfMReturn => {
             output.push_str("FfMReturn");
+        }
+        OpCode::I64MReturn => {
+            output.push_str("I64MReturn");
         }
         OpCode::FfMStore => {
             output.push_str("FfMStore");
@@ -1307,6 +1424,12 @@ where
         OpCode::I64Load => {
             output.push_str("I64Load");
         }
+        OpCode::I64Return => {
+            output.push_str("I64Return");
+        }
+        OpCode::I64Store => {
+            output.push_str("I64Store");
+        }
         OpCode::OpLt => {
             output.push_str("OpLt");
         }
@@ -1336,6 +1459,9 @@ where
         }
         OpCode::OpI64Eq => {
             output.push_str("OpI64Eq");
+        }
+        OpCode::OpI64Neq => {
+            output.push_str("OpI64Neq");
         }
         OpCode::OpI64Eqz => {
             output.push_str("OpI64Eqz");
@@ -1375,6 +1501,9 @@ where
         }
         OpCode::FfReturn => {
             output.push_str("FfReturn");
+        }
+        OpCode::FfExtendI64 => {
+            output.push_str("FfExtendI64");
         }
         OpCode::OpBxor => {
             output.push_str("OpBxor");
@@ -1924,6 +2053,124 @@ where
                 let rhs = vm.pop_i64()?;
                 vm.push_i64(lhs-rhs);
             }
+            OpCode::OpI64Div => {
+                let lhs = vm.pop_i64()?;
+                let rhs = vm.pop_i64()?;
+                if rhs == 0 {
+                    return Err(Box::new(RuntimeError::AttemptDivideByZeroComponent));
+                }
+                vm.push_i64(lhs.div(rhs));
+            }
+            OpCode::OpI64Pow => {
+                let exp = vm.pop_i64()?;
+                let base = vm.pop_i64()?;
+
+                if exp < 0 {
+                    return Err(Box::new(RuntimeError::I32ToUsizeConversion));
+                }
+
+                vm.push_i64(base.pow(exp as u32));
+            }
+            OpCode::OpI64Rem => {
+                let b = vm.pop_i64()?;
+                let a = vm.pop_i64()?;
+
+                if b == 0 {
+                    return Err(Box::new(RuntimeError::AttemptDivideByZeroComponent));
+                }
+
+                vm.push_i64(a % b);
+            }
+            OpCode::OpI64And => {
+                let lhs = vm.pop_i64()?;
+                let rhs = vm.pop_i64()?;
+                vm.push_i64(lhs & rhs);
+            }
+            OpCode::OpI64Or => {
+                let lhs = vm.pop_i64()?;
+                let rhs = vm.pop_i64()?;
+                vm.push_i64(lhs | rhs);
+            }
+            OpCode::OpI64Shl => {
+                let shift = vm.pop_i64()?;
+                let value = vm.pop_i64()?;
+
+                // Rust masks shift by & 63 automatically, but we ensure u32
+                // Ref: https://doc.rust-lang.org/std/primitive.i64.html
+                let s = (shift as u64 & 63) as u32;
+
+                let result = value.wrapping_shl(s);
+                vm.push_i64(result);
+            }
+            OpCode::OpI64Shr => {
+                let shift = vm.pop_i64()?;
+                let value = vm.pop_i64()?;
+
+                // Rust masks shift by & 63 automatically, but we ensure u32
+                // Ref: https://doc.rust-lang.org/std/primitive.i64.html
+                let s = (shift as u64 & 63) as u32;
+
+                let result = value.wrapping_shr(s);
+                vm.push_i64(result);
+            }
+            OpCode::OpI64BNot => {
+                let val = vm.pop_i64()?;
+                vm.push_i64(!val);
+            }
+            OpCode::OpI64BXor => {
+                let rhs = vm.pop_i64()?;
+                let lhs = vm.pop_i64()?;
+                vm.push_i64(rhs ^ lhs);
+            }
+            OpCode::OpI64BOr => {
+                let rhs = vm.pop_i64()?;
+                let lhs = vm.pop_i64()?;
+                vm.push_i64(rhs | lhs);
+            }
+            OpCode::OpI64BAnd => {
+                let rhs = vm.pop_i64()?;
+                let lhs = vm.pop_i64()?;
+                vm.push_i64(rhs & lhs);
+            }
+            OpCode::I64MReturn => {
+                let size = vm.pop_usize()?;
+                let src_addr = vm.pop_usize()?;
+                let dst_addr = vm.pop_usize()?;
+
+                let call_frame = vm.call_stack.pop()
+                    .ok_or(RuntimeError::CallStackUnderflow)?;
+
+                for i in 0..size {
+                    let src_idx = src_addr + i + vm.memory_base_pointer_i64;
+                    let dst_idx = dst_addr + i + call_frame.return_memory_base_pointer_i64;
+
+                    if src_idx < vm.memory_i64.len() {
+                        if dst_idx >= vm.memory_i64.len() {
+                            vm.memory_i64.resize(dst_idx + 1, None);
+                        }
+
+                        vm.memory_i64[dst_idx] = vm.memory_i64[src_idx];
+                        vm.memory_i64[src_idx] = None;
+                    }
+                }
+
+                ip = call_frame.return_ip;
+                vm.current_execution_context = call_frame.return_context;
+                vm.stack_base_pointer_ff = call_frame.return_stack_base_pointer_ff;
+                vm.stack_base_pointer_i64 = call_frame.return_stack_base_pointer_i64;
+                vm.memory_base_pointer_ff = call_frame.return_memory_base_pointer_ff;
+                vm.memory_base_pointer_i64 = call_frame.return_memory_base_pointer_i64;
+
+                #[cfg(feature = "debug_vm2")]
+                {
+                    (code, name, ff_variable_names, i64_variable_names) =
+                        get_current_context(&vm, circuit, component_tree);
+                }
+                #[cfg(not(feature = "debug_vm2"))]
+                {
+                    code = get_current_context(&vm, circuit, component_tree);
+                }
+            }
             OpCode::FfMReturn => {
                 // Pop size, src, dst from stack
                 let size = vm.pop_usize()?;
@@ -2181,6 +2428,18 @@ where
                     code = get_current_context(&vm, circuit, component_tree);
                 }
             }
+            OpCode::FfExtendI64 => {
+                let value = vm.pop_i64()?;
+
+                let ff_value = FieldOps::from_le_bytes(&value.to_le_bytes()).unwrap();
+
+                vm.push_ff(ff_value);
+
+                #[cfg(feature = "debug_vm2")]
+                {
+                    println!("FfExtendI64: {} -> {}", value, fe);
+                }
+            }
             OpCode::FfStore => {
                 let addr: usize = vm.pop_i64()?.try_into()
                     .map_err(|_| Box::new(RuntimeError::MemoryAddressOutOfBounds))?;
@@ -2221,6 +2480,47 @@ where
                     .and_then(|v| v.as_ref())
                     .ok_or(RuntimeError::MemoryVariableIsNotSet)?;
                 vm.push_i64(*value);
+            }
+            OpCode::I64Return => {
+                let return_value = vm.pop_i64()?;
+                let call_frame = vm.call_stack.pop()
+                    .ok_or(RuntimeError::CallStackUnderflow)?;
+
+                ip = call_frame.return_ip;
+                vm.current_execution_context = call_frame.return_context;
+                vm.stack_base_pointer_ff = call_frame.return_stack_base_pointer_ff;
+                vm.stack_base_pointer_i64 = call_frame.return_stack_base_pointer_i64;
+                vm.memory_base_pointer_ff = call_frame.return_memory_base_pointer_ff;
+                vm.memory_base_pointer_i64 = call_frame.return_memory_base_pointer_i64;
+
+                vm.push_i64(return_value);
+
+                #[cfg(feature = "debug_vm2")]
+                {
+                    (code, name, ff_variable_names, i64_variable_names) =
+                        get_current_context(&vm, circuit, component_tree);
+                }
+                #[cfg(not(feature = "debug_vm2"))]
+                {
+                    code = get_current_context(&vm, circuit, component_tree);
+                }
+            }
+            OpCode::I64Store => {
+                let addr: usize = vm.pop_i64()?.try_into()
+                    .map_err(|_| Box::new(RuntimeError::MemoryAddressOutOfBounds))?;
+                let addr = addr.checked_add(vm.memory_base_pointer_i64)
+                    .ok_or(Box::new(RuntimeError::MemoryAddressOutOfBounds))?;
+
+                    if addr >= vm.memory_i64.len() {
+                    vm.memory_i64.resize(addr + 1, None);
+                }
+
+                let value = vm.pop_i64()?;
+                vm.memory_i64[addr] = Some(value);
+                #[cfg(feature = "debug_vm2")]
+                {
+                    println!("I64Store: [{}] = {}", addr, value);
+                }
             }
             OpCode::OpLt => {
                 let lhs = vm.pop_ff()?;
@@ -2296,6 +2596,11 @@ where
                 let rhs = vm.pop_i64()?;
                 let lhs = vm.pop_i64()?;
                 vm.push_i64(if lhs == rhs { 1 } else { 0 });
+            }
+            OpCode::OpI64Neq => {
+                let rhs = vm.pop_i64()?;
+                let lhs = vm.pop_i64()?;
+                vm.push_i64(if lhs != rhs { 1 } else { 0 });
             }
             OpCode::OpI64Eqz => {
                 let arg = vm.pop_i64()?;

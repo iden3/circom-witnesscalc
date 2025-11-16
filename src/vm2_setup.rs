@@ -6,9 +6,12 @@ use crate::vm2::{Component, InputInfo, Template, Type, TypeFieldKind};
 
 /// Initialize signals array with input values from JSON
 pub fn init_signals<T: FieldOps, F>(
-    inputs_json: impl std::io::Read, ff: &F, types: &[Type],
+    inputs_json: impl std::io::Read,
+    ff: &F,
+    types: &[Type],
     input_infos: &[InputInfo],
-    component: &mut Component<T>) -> Result<(), Box<dyn std::error::Error>>
+    component: &mut Component<T>
+) -> Result<(), Box<dyn std::error::Error>>
 where
         for <'a> &'a F: FieldOperations<Type = T> {
 
@@ -36,6 +39,15 @@ where
             if let Some(&signal_idx) = signal_path_to_idx.get(&multidim_path) {
                 signal_path_to_idx.remove(&multidim_path);
                 component.set_signal(signal_idx-1, *value).map_err(|e| -> Box<dyn Error> {e})?;
+                continue;
+            }
+        }
+
+        if let Some(field_path) = try_convert_bus_flat_to_field_path(path, input_infos, types) {
+            if let Some(&signal_idx) = signal_path_to_idx.get(&field_path) {
+                signal_path_to_idx.remove(&field_path);
+                // ToDo: Investigate why component signals start expected only in flat buses structures
+                component.set_signal(signal_idx + component.signals_start, *value).map_err(|e| -> Box<dyn Error> {e})?;
                 continue;
             }
         }
@@ -212,6 +224,49 @@ fn expand_bus_type(
     }
 
     Ok(())
+}
+
+fn try_convert_bus_flat_to_field_path(
+    path: &str,
+    input_infos: &[InputInfo],
+    types: &[Type],
+) -> Option<String> {
+    let bracket_start = path.find('[')?;
+    let base_name = &path[..bracket_start];
+    let flat_idx_str = path[bracket_start+1..].strip_suffix(']')?;
+    let flat_idx = flat_idx_str.parse::<usize>().ok()?;
+
+    let input_info = input_infos.iter().find(|ii| ii.name == base_name)?;
+    let type_id = input_info.type_id.as_ref()?;
+
+    let bus_type = types.iter().find(|t| t.name == *type_id)?;
+
+    let mut paths: Vec<(String, usize)> = Vec::new();
+    let mut current_offset = input_info.offset;
+
+    let bus_count: usize = if input_info.lengths.is_empty() {
+        1
+    } else {
+        input_info.lengths.iter().product()
+    };
+
+    for i in 0..bus_count {
+        let instance_path = if bus_count == 1 {
+            base_name.to_string()
+        } else {
+            format!("{}[{}]", base_name, i)
+        };
+
+        let mut tmp_paths: Vec<(String, usize)> = Vec::new();
+        let mut local_offset = current_offset;
+
+        expand_bus_type(&instance_path, bus_type, types, &mut local_offset, &mut tmp_paths).ok()?;
+
+        current_offset = local_offset;
+        paths.extend(tmp_paths);
+    }
+
+    paths.get(flat_idx).map(|(p, _)| p.clone())
 }
 
 /// Check if a path represents a flat array access and convert to multi-dimensional path
