@@ -14,8 +14,10 @@ pub mod parser;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
+use std::io::{Cursor, Read};
 use std::slice::from_raw_parts;
 use anyhow::anyhow;
+use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
 use ruint::aliases::U256;
 use ruint::ParseError;
 use crate::graph::{evaluate, Nodes, NodesInterface, NodesStorage, VecNodes};
@@ -30,6 +32,27 @@ use crate::vm2::{execute, Circuit};
 use crate::vm2_setup::{build_component_tree, init_signals};
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
+
+const WITNESS_CACHE_MAGIC: &[u8] = b"wtns.cache.001";
+
+pub struct CalcWitnessOptions<'a> {
+    pub reuse_cache: Option<&'a [u8]>,
+    pub generate_cache: bool,
+}
+
+impl<'a> Default for CalcWitnessOptions<'a> {
+    fn default() -> Self {
+        Self {
+            reuse_cache: None,
+            generate_cache: false,
+        }
+    }
+}
+
+pub struct CalcWitnessResult {
+    pub witness: Vec<u8>,
+    pub cache: Option<Vec<u8>>,
+}
 
 pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.rs"));
@@ -160,21 +183,35 @@ pub fn wtns_from_witness2<const FS: usize, T: FieldOps>(
     buf
 }
 
-pub fn calc_witness(
+pub fn calc_witness_with_cache<'a>(
     inputs: &str,
-    wcd_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    wcd_data: &[u8],
+    options: CalcWitnessOptions<'a>,
+) -> Result<CalcWitnessResult, Box<dyn std::error::Error>> {
     if wcd_data.starts_with(WITNESSCALC_GRAPH_MAGIC) {
-        calc_witness_graph(inputs, wcd_data)
+        calc_witness_graph(inputs, wcd_data, options)
     } else if wcd_data.starts_with(WITNESSCALC_CVM_MAGIC) {
-        calc_witness_vm2_buf(wcd_data, inputs)
+        if options.reuse_cache.is_some() || options.generate_cache {
+            return Err("Witness cache is not supported for VM circuits".into());
+        }
+        let witness = calc_witness_vm2_buf(wcd_data, inputs)?;
+        Ok(CalcWitnessResult { witness, cache: None })
     } else {
         Err("Unknown WCD file format".into())
     }
 }
 
+pub fn calc_witness(
+    inputs: &str,
+    wcd_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let result = calc_witness_with_cache(inputs, wcd_data, CalcWitnessOptions::default())?;
+    Ok(result.witness)
+}
+
 fn calc_witness_graph(
     inputs: &str,
-    graph_data: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    graph_data: &[u8],
+    options: CalcWitnessOptions) -> Result<CalcWitnessResult, Box<dyn std::error::Error>> {
 
     let start = std::time::Instant::now();
     // let inputs = deserialize_inputs(inputs.as_bytes())?;
@@ -190,36 +227,224 @@ fn calc_witness_graph(
     // populate_inputs(&inputs, &input_mapping, &mut inputs_buffer);
     println!("Inputs populated in {:?}", start.elapsed());
 
+    let reuse_cache = options.reuse_cache;
+    let generate_cache = options.generate_cache;
+
     if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
-        let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
-        let vec_witness: Vec<FieldElement<32>> = result
+        let result = calc_witness_typed(
+            nodes, inputs, &input_mapping, &signals, reuse_cache, generate_cache)?;
+        let vec_witness: Vec<FieldElement<32>> = result.witness_values
             .iter()
             .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
             .collect();
-        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
+        Ok(CalcWitnessResult {
+            witness: wtns_from_witness2(vec_witness, nodes.prime()),
+            cache: result.cache_bytes,
+        })
     } else if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U64, VecNodes>>() {
-        let result = calc_witness_typed(nodes, inputs, &input_mapping, &signals)?;
-        let vec_witness: Vec<FieldElement<8>> = result
+        let result = calc_witness_typed(
+            nodes, inputs, &input_mapping, &signals, reuse_cache, generate_cache)?;
+        let vec_witness: Vec<FieldElement<8>> = result.witness_values
             .iter()
             .map(|a| TryInto::<[u8; 8]>::try_into(a.as_le_slice()).unwrap().into())
             .collect();
-        Ok(wtns_from_witness2(vec_witness, nodes.prime()))
+        Ok(CalcWitnessResult {
+            witness: wtns_from_witness2(vec_witness, nodes.prime()),
+            cache: result.cache_bytes,
+        })
     } else {
         Err(anyhow!("Invalid nodes type").into())
     }
 }
 
-fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
+fn calc_witness_typed<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     nodes: &Nodes<T, NS>, inputs: &str, input_mapping: &InputSignalsInfo,
-    signals: &[usize]) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+    signals: &[usize], reuse_cache: Option<&[u8]>,
+    generate_cache: bool) -> Result<TypedWitnessResult<T>, Box<dyn std::error::Error>> {
 
     let inputs = deserialize_inputs2(
         inputs.as_bytes(), &nodes.ff)?;
-    let inputs = create_inputs(&inputs, input_mapping)?;
-    let result = evaluate(
-        &nodes.ff, &nodes.nodes, &inputs, signals,
-        &nodes.constants);
-    Ok(result)
+    let flattened_inputs = create_inputs(&inputs, input_mapping)?;
+    let prime_bytes = T::to_le_bytes(&nodes.prime());
+
+    let (witness_values, node_values) = if let Some(cache_bytes) = reuse_cache {
+        let cache = GraphCacheValues::deserialize(
+            cache_bytes, &prime_bytes, nodes.len(),
+            flattened_inputs.len())?;
+        evaluate_with_cache(
+            &nodes.ff, &nodes.nodes, &flattened_inputs,
+            &cache, signals, &nodes.constants)
+    } else {
+        evaluate(
+            &nodes.ff, &nodes.nodes, &flattened_inputs, signals,
+            &nodes.constants)
+    };
+
+    let cache_bytes = if generate_cache {
+        Some(GraphCacheValues::serialize(
+            &flattened_inputs, &node_values, &prime_bytes)?)
+    } else {
+        None
+    };
+
+    Ok(TypedWitnessResult {
+        witness_values,
+        cache_bytes,
+    })
+}
+
+struct TypedWitnessResult<T: FieldOps> {
+    witness_values: Vec<T>,
+    cache_bytes: Option<Vec<u8>>,
+}
+
+struct GraphCacheValues<T: FieldOps> {
+    inputs: Vec<T>,
+    node_values: Vec<T>,
+}
+
+impl<T: FieldOps> GraphCacheValues<T> {
+    fn serialize(
+        inputs: &[T], node_values: &[T], prime_bytes: &[u8]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(WITNESS_CACHE_MAGIC);
+        buf.write_u32::<LittleEndian>(T::BYTES as u32)?;
+        buf.write_u32::<LittleEndian>(prime_bytes.len() as u32)?;
+        buf.write_u32::<LittleEndian>(node_values.len() as u32)?;
+        buf.write_u32::<LittleEndian>(inputs.len() as u32)?;
+        buf.extend_from_slice(prime_bytes);
+        for value in node_values {
+            let mut bytes = value.to_le_bytes();
+            if bytes.len() != T::BYTES {
+                bytes.resize(T::BYTES, 0);
+            }
+            buf.extend_from_slice(&bytes);
+        }
+        for value in inputs {
+            let mut bytes = value.to_le_bytes();
+            if bytes.len() != T::BYTES {
+                bytes.resize(T::BYTES, 0);
+            }
+            buf.extend_from_slice(&bytes);
+        }
+        Ok(buf)
+    }
+
+    fn deserialize(
+        data: &[u8], expected_prime: &[u8], node_len: usize,
+        input_len: usize) -> Result<Self, Box<dyn std::error::Error>> {
+        if data.len() < WITNESS_CACHE_MAGIC.len() {
+            return Err(anyhow!("Witness cache file is too short").into());
+        }
+        let mut cursor = Cursor::new(data);
+        let mut magic = vec![0u8; WITNESS_CACHE_MAGIC.len()];
+        cursor.read_exact(&mut magic)?;
+        if magic != WITNESS_CACHE_MAGIC {
+            return Err(anyhow!("Invalid witness cache file").into());
+        }
+        let field_bytes = cursor.read_u32::<LittleEndian>()? as usize;
+        if field_bytes != T::BYTES {
+            return Err(anyhow!("Witness cache field size mismatch").into());
+        }
+        let prime_len = cursor.read_u32::<LittleEndian>()? as usize;
+        let stored_nodes = cursor.read_u32::<LittleEndian>()? as usize;
+        let stored_inputs = cursor.read_u32::<LittleEndian>()? as usize;
+        if stored_nodes != node_len {
+            return Err(anyhow!(
+                "Witness cache node count mismatch (expected {}, got {})",
+                node_len, stored_nodes).into());
+        }
+        if stored_inputs != input_len {
+            return Err(anyhow!(
+                "Witness cache input count mismatch (expected {}, got {})",
+                input_len, stored_inputs).into());
+        }
+        let mut prime_bytes = vec![0u8; prime_len];
+        cursor.read_exact(&mut prime_bytes)?;
+        if prime_bytes != expected_prime {
+            return Err(anyhow!("Witness cache field prime mismatch").into());
+        }
+        let mut node_values = Vec::with_capacity(stored_nodes);
+        let mut buf = vec![0u8; field_bytes];
+        for _ in 0..stored_nodes {
+            cursor.read_exact(&mut buf)?;
+            let value = T::from_le_bytes(&buf).map_err(|e| -> Box<dyn std::error::Error> { e })?;
+            node_values.push(value);
+        }
+        let mut inputs = Vec::with_capacity(stored_inputs);
+        for _ in 0..stored_inputs {
+            cursor.read_exact(&mut buf)?;
+            let value = T::from_le_bytes(&buf).map_err(|e| -> Box<dyn std::error::Error> { e })?;
+            inputs.push(value);
+        }
+        Ok(Self { inputs, node_values })
+    }
+}
+
+fn evaluate_with_cache<T: FieldOps, F: FieldOperations<Type = T>, NS: NodesStorage>(
+    ff: F, nodes: &NS, inputs: &[T], cache: &GraphCacheValues<T>,
+    outputs: &[usize], constants: &[T]) -> (Vec<T>, Vec<T>)
+where Vec<T>: FromIterator<<F as FieldOperations>::Type> {
+    assert_eq!(cache.node_values.len(), nodes.len());
+    assert_eq!(cache.inputs.len(), inputs.len());
+    let mut values = Vec::with_capacity(nodes.len());
+    let mut dirty = Vec::with_capacity(nodes.len());
+
+    for i in 0..nodes.len() {
+        let node = nodes.get(i).unwrap();
+        match node {
+            graph::Node::Unknown => panic!("Unknown node"),
+            graph::Node::Constant(idx) => {
+                values.push(constants[idx]);
+                dirty.push(false);
+            }
+            graph::Node::Input(idx) => {
+                let new_val = inputs[idx];
+                let old_val = cache.inputs[idx];
+                let changed = new_val != old_val;
+                let value = if changed {
+                    new_val
+                } else {
+                    cache.node_values[i]
+                };
+                values.push(value);
+                dirty.push(changed);
+            }
+            graph::Node::Op(op, a, b) => {
+                let changed = dirty[a] || dirty[b];
+                if changed {
+                    let value = ff.op_duo(op, values[a], values[b]);
+                    values.push(value);
+                } else {
+                    values.push(cache.node_values[i]);
+                }
+                dirty.push(changed);
+            }
+            graph::Node::UnoOp(op, a) => {
+                let changed = dirty[a];
+                if changed {
+                    let value = ff.op_uno(op, values[a]);
+                    values.push(value);
+                } else {
+                    values.push(cache.node_values[i]);
+                }
+                dirty.push(changed);
+            }
+            graph::Node::TresOp(op, a, b, c) => {
+                let changed = dirty[a] || dirty[b] || dirty[c];
+                if changed {
+                    let value = ff.op_tres(op, values[a], values[b], values[c]);
+                    values.push(value);
+                } else {
+                    values.push(cache.node_values[i]);
+                }
+                dirty.push(changed);
+            }
+        }
+    }
+
+    let witness = outputs.iter().map(|&i| values[i]).collect();
+    (witness, values)
 }
 
 fn create_inputs<T: FieldOps>(
