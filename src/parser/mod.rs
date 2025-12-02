@@ -817,6 +817,8 @@ fn parse_statement(input: &mut &str) -> ModalResult<Statement> {
                 |(dst, src, addr, size)| Statement::FfMStoreFromCmpSignal { dst, src, addr, size }),
         "ff.return" => preceded(space1, parse_ff_expression)
             .map(|value| Statement::FfReturn { value }),
+        "ff.extend_i64" => preceded(space1, parse_i64_operand)
+            .map(|value| Statement::FfExtendI64 { value }),
         "ff.mcall" => {
             |i: &mut &str| {
                 // Parse the function name prefixed with $
@@ -934,12 +936,26 @@ fn parse_i64_expression(input: &mut &str) -> ModalResult<I64Expr> {
                 .map(|(op1, op2)| I64Expr::Sub(Box::new(op1), Box::new(op2))),
             "i64.mul" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
                 .map(|(op1, op2)| I64Expr::Mul(Box::new(op1), Box::new(op2))),
+            "i64.div" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Div(Box::new(op1), Box::new(op2))),
+            "i64.pow" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Pow(Box::new(op1), Box::new(op2))),
+            "i64.rem" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Rem(Box::new(op1), Box::new(op2))),
+            "i64.and" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::And(Box::new(op1), Box::new(op2))),
+            "i64.or" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Or(Box::new(op1), Box::new(op2))),
             "i64.le" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
                 .map(|(op1, op2)| I64Expr::Lte(Box::new(op1), Box::new(op2))),
             "i64.load" => preceded(space1, parse_i64_operand)
                 .map(I64Expr::Load),
+            "i64.store" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Store(Box::new(op1), Box::new(op2))),
             "i64.eq" => (preceded(space1, parse_i64_operand), preceded(space1, parse_i64_operand))
                 .map(|(op1, op2)| I64Expr::Eq(op1, op2)),
+            "i64.neq" => (preceded(space1, parse_i64_operand), preceded(space1, parse_i64_operand))
+                .map(|(op1, op2)| I64Expr::Neq(op1, op2)),
             "i64.eqz" => preceded(space1, parse_i64_operand)
                 .map(I64Expr::Eqz),
             "i64.lt" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
@@ -948,8 +964,27 @@ fn parse_i64_expression(input: &mut &str) -> ModalResult<I64Expr> {
                 .map(|(op1, op2)| I64Expr::Gte(Box::new(op1), Box::new(op2))),
             "i64.gt" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
                 .map(|(op1, op2)| I64Expr::Gt(Box::new(op1), Box::new(op2))),
+            "i64.shl" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Shl(Box::new(op1), Box::new(op2))),
+            "i64.shr" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::Shr(Box::new(op1), Box::new(op2))),
+            "i64.bnot" => preceded(space1, parse_i64_operand)
+                .map(I64Expr::BNot),
+            "i64.bxor" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::BXor(Box::new(op1), Box::new(op2))),
+            "i64.bor" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::BOr(Box::new(op1), Box::new(op2))),
+            "i64.band" => (preceded(space1, parse_i64_expression), preceded(space1, parse_i64_expression))
+                .map(|(op1, op2)| I64Expr::BAnd(Box::new(op1), Box::new(op2))),
             "i64.wrap_ff" => preceded(space1, parse_ff_expr)
                 .map(|expr| I64Expr::Wrap(Box::new(expr))),
+            "i64.return" => preceded(space1, parse_i64_operand)
+                .map(I64Expr::Return),
+            "i64.mreturn" => (
+                preceded(space1, parse_i64_operand),
+                preceded(space1, parse_i64_operand),
+                preceded(space1, parse_i64_operand))
+                .map(|(op1, op2, op3)| I64Expr::MReturn{ dst: op1, src: op2, size: op3 }),
             "get_template_id" => preceded(space1, parse_i64_operand)
                 .map(I64Expr::GetTemplateId),
             "get_template_signal_type" => (

@@ -486,14 +486,63 @@ where
             i64_expression(ctx, ff, lhs)?;
             ctx.code.push(OpCode::OpI64Mul as u8);
         }
+        I64Expr::Div(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Div as u8);
+        }
+        I64Expr::Pow(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Pow as u8);
+        }
+        I64Expr::Rem(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Rem as u8);
+        }
+        I64Expr::And(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64And as u8);
+        }
+        I64Expr::Or(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Or as u8);
+        }
         I64Expr::Eq(lhs, rhs) => {
             operand_i64(ctx, rhs);
             operand_i64(ctx, lhs);
             ctx.code.push(OpCode::OpI64Eq as u8);
         }
-        I64Expr::Eqz(arg) => {
-            operand_i64(ctx, arg);
+        I64Expr::Neq(lhs, rhs) => {
+            operand_i64(ctx, rhs);
+            operand_i64(ctx, lhs);
+            ctx.code.push(OpCode::OpI64Neq as u8);
+        }
+        I64Expr::Eqz(value) => {
+            operand_i64(ctx, value);
             ctx.code.push(OpCode::OpI64Eqz as u8);
+        }
+        I64Expr::BNot(arg) => {
+            operand_i64(ctx, arg);
+            ctx.code.push(OpCode::OpI64BNot as u8);
+        }
+        I64Expr::BXor(rhs, lhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64BXor as u8);
+        }
+        I64Expr::BOr(rhs, lhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64BOr as u8);
+        }
+        I64Expr::BAnd(rhs, lhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64BAnd as u8);
         }
         I64Expr::Lt(lhs, rhs) => {
             i64_expression(ctx, ff, rhs)?;
@@ -515,9 +564,36 @@ where
             i64_expression(ctx, ff, lhs)?;
             ctx.code.push(OpCode::OpI64Gte as u8);
         }
+        I64Expr::Shl(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Shl as u8);
+        }
+        I64Expr::Shr(lhs, rhs) => {
+            i64_expression(ctx, ff, rhs)?;
+            i64_expression(ctx, ff, lhs)?;
+            ctx.code.push(OpCode::OpI64Shr as u8);
+        }
         I64Expr::Load(addr) => {
             operand_i64(ctx, addr);
             ctx.code.push(OpCode::I64Load as u8);
+        }
+        I64Expr::Return(addr) => {
+            operand_i64(ctx, addr);
+            ctx.code.push(OpCode::I64Return as u8);
+        }
+        I64Expr::MReturn { dst, src, size } => {
+            // Push operands in reverse order so they are popped in correct order
+            // The VM expects: stack[-2]=dst, stack[-1]=src, stack[0]=size
+            operand_i64(ctx, dst);
+            operand_i64(ctx, src);
+            operand_i64(ctx, size);
+            ctx.code.push(OpCode::I64MReturn as u8);
+        },
+        I64Expr::Store(index, value) => {
+            i64_expression(ctx, ff, index)?;
+            i64_expression(ctx, ff, value)?;
+            ctx.code.push(OpCode::I64Store as u8);
         }
         I64Expr::Wrap(ff_expr) => {
             ff_expression(ctx, ff, ff_expr)?;
@@ -1061,6 +1137,10 @@ where
         Statement::FfReturn { value } => {
             ff_expression(ctx, ff, value)?;
             ctx.code.push(OpCode::FfReturn as u8);
+        },
+        Statement::FfExtendI64 { value } => {
+            operand_i64(ctx, value);
+            ctx.code.push(OpCode::FfExtendI64 as u8);
         },
         Statement::FfMCall { name: function_name, args } => {
             // Emit the FfMCall opcode

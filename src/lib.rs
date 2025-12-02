@@ -452,8 +452,12 @@ pub fn calculate_witness_vm2<T: FieldOps>(
         circuit.main_template_id, &circuit.templates);
 
     init_signals(
-        inputs_json, &circuit.field, &circuit.types, &circuit.input_infos,
-        &mut component_tree)?;
+        inputs_json,
+        &circuit.field,
+        &circuit.types,
+        &circuit.input_infos,
+        &mut component_tree,
+    )?;
 
     #[cfg(feature = "debug_vm2")]
     vm2_setup::debug_component_tree(&component_tree, &circuit.templates);
