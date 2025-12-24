@@ -1,0 +1,253 @@
+name: Build and Release
+
+on:
+  release:
+    types: [created]
+  push:
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Try to restore Rust artifacts from the cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust version
+        run: |
+          rustc --version
+          cargo --version
+
+      - name: Install targets
+        run: |
+          rustup target add aarch64-apple-ios aarch64-apple-ios-sim aarch64-linux-android x86_64-apple-ios x86_64-linux-android
+          rustup target list --installed
+
+      - name: Install dependencies
+        uses: tecolicom/actions-use-homebrew-tools@v1
+        with:
+          tools: protobuf
+
+      - name: Try to build everyting
+        run: |
+          make all
+
+      - name: Lint
+        run: cargo clippy --all-targets --all-features --workspace
+
+      - name: Run tests
+        run: cargo test --all-targets --all-features --workspace
+
+#      - name: Install Rust
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          toolchain: stable
+#          override: true
+#
+#      - name: Add iOS targets
+#        run: |
+#          rustup target add aarch64-apple-ios
+#          rustup target add x86_64-apple-ios
+#          rustup target add aarch64-apple-ios-sim
+#          rustup target add aarch64-apple-darwin
+#
+#      - name: Build macOS libraries
+#        run: |
+#          cargo build --target aarch64-apple-darwin --release
+#
+#      - name: Build iOS libraries
+#        run: |
+#          cargo build --target aarch64-apple-ios --release
+#          cargo build --target x86_64-apple-ios --release
+#          cargo build --target aarch64-apple-ios-sim --release
+#
+#      - name: Create library structure
+#        run: |
+#          mkdir -p circom-witnesscalc/aarch64-apple-darwin
+#          mkdir -p circom-witnesscalc/aarch64-apple-ios
+#          mkdir -p circom-witnesscalc/aarch64-apple-ios-sim
+#          mkdir -p circom-witnesscalc/x86_64-apple-ios
+#
+#          # macOS
+#          cp target/aarch64-apple-darwin/release/build-circuit circom-witnesscalc/aarch64-apple-darwin/
+#          cp target/aarch64-apple-darwin/release/calc-witness circom-witnesscalc/aarch64-apple-darwin/
+#          cp target/aarch64-apple-darwin/release/libcircom_witnesscalc.a circom-witnesscalc/aarch64-apple-darwin/
+#          cp target/aarch64-apple-darwin/release/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-darwin/
+#          install_name_tool -id @rpath/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-darwin/libcircom_witnesscalc.dylib
+#
+#          # iOS
+#          cp target/aarch64-apple-ios/release/libcircom_witnesscalc.a circom-witnesscalc/aarch64-apple-ios/
+#          cp target/aarch64-apple-ios/release/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-ios/
+#          install_name_tool -id @rpath/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-ios/libcircom_witnesscalc.dylib
+#
+#          # iOS Simulator ARM
+#          cp target/aarch64-apple-ios-sim/release/libcircom_witnesscalc.a circom-witnesscalc/aarch64-apple-ios-sim/
+#          cp target/aarch64-apple-ios-sim/release/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-ios-sim/
+#          install_name_tool -id @rpath/libcircom_witnesscalc.dylib circom-witnesscalc/aarch64-apple-ios-sim/libcircom_witnesscalc.dylib
+#
+#          # iOS Simulator x86_64
+#          cp target/x86_64-apple-ios/release/libcircom_witnesscalc.a circom-witnesscalc/x86_64-apple-ios/
+#          cp target/x86_64-apple-ios/release/libcircom_witnesscalc.dylib circom-witnesscalc/x86_64-apple-ios/
+#          install_name_tool -id @rpath/libcircom_witnesscalc.dylib circom-witnesscalc/x86_64-apple-ios/libcircom_witnesscalc.dylib
+#
+#      - name: Create macOS/iOS archive
+#        run: tar -czf circom-witnesscalc-apple.tar.gz circom-witnesscalc/
+#
+#      - name: Upload macOS/iOS artifacts
+#        uses: actions/upload-release-asset@v1
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#        with:
+#          upload_url: ${{ github.event.release.upload_url }}
+#          asset_path: ./circom-witnesscalc-apple.tar.gz
+#          asset_name: circom-witnesscalc-apple.tar.gz
+#          asset_content_type: application/gzip
+#
+#  build-android:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          submodules: recursive
+#
+#      - name: Install Rust
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          toolchain: stable
+#          override: true
+#
+#      - name: Setup Android NDK
+#        uses: nttld/setup-ndk@v1
+#        id: setup-ndk
+#        with:
+#          ndk-version: r26b
+#
+#      - name: Add Android targets
+#        run: |
+#          rustup target add aarch64-linux-android
+#          rustup target add x86_64-linux-android
+#
+#      - name: Build Android libraries
+#        env:
+#          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+#        run: |
+#          # Android aarch64
+#          export CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang
+#          export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$CC
+#          export CLANG_PATH=$CC
+#          cargo build --target aarch64-linux-android --release
+#
+#          # Android x86_64
+#          export CC=${ANDROID_NDK_HOME}/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang
+#          export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$CC
+#          export CLANG_PATH=$CC
+#          cargo build --target x86_64-linux-android --release
+#
+#      - name: Create library structure
+#        run: |
+#          mkdir -p circom-witnesscalc/aarch64-linux-android
+#          mkdir -p circom-witnesscalc/x86_64-linux-android
+#
+#          # Android ARM
+#          cp target/aarch64-linux-android/release/libcircom_witnesscalc.a circom-witnesscalc/aarch64-linux-android/
+#          cp target/aarch64-linux-android/release/libcircom_witnesscalc.so circom-witnesscalc/aarch64-linux-android/
+#
+#          # Android x86_64
+#          cp target/x86_64-linux-android/release/libcircom_witnesscalc.a circom-witnesscalc/x86_64-linux-android/
+#          cp target/x86_64-linux-android/release/libcircom_witnesscalc.so circom-witnesscalc/x86_64-linux-android/
+#
+#      - name: Create Android archive
+#        run: tar -czf circom-witnesscalc-android.tar.gz circom-witnesscalc/
+#
+#      - name: Upload Android artifacts
+#        uses: actions/upload-release-asset@v1
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#        with:
+#          upload_url: ${{ github.event.release.upload_url }}
+#          asset_path: ./circom-witnesscalc-android.tar.gz
+#          asset_name: circom-witnesscalc-android.tar.gz
+#          asset_content_type: application/gzip
+#
+#  build-linux:
+#    runs-on: ubuntu-latest
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          submodules: recursive
+#
+#      - name: Install Rust
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          toolchain: stable
+#          override: true
+#
+#      - name: Build Linux libraries
+#        run: |
+#          cargo build --release
+#
+#      - name: Create library structure
+#        run: |
+#          mkdir -p circom-witnesscalc/x86_64-unknown-linux-gnu
+#
+#          cp target/release/build-circuit circom-witnesscalc/x86_64-unknown-linux-gnu/
+#          cp target/release/calc-witness circom-witnesscalc/x86_64-unknown-linux-gnu/
+#          cp target/release/libcircom_witnesscalc.a circom-witnesscalc/x86_64-unknown-linux-gnu/
+#          cp target/release/libcircom_witnesscalc.so circom-witnesscalc/x86_64-unknown-linux-gnu/
+#
+#      - name: Create Linux archive
+#        run: tar -czf circom-witnesscalc-linux-x86_64.tar.gz circom-witnesscalc/
+#
+#      - name: Upload Linux artifacts
+#        uses: actions/upload-release-asset@v1
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#        with:
+#          upload_url: ${{ github.event.release.upload_url }}
+#          asset_path: ./circom-witnesscalc-linux-x86_64.tar.gz
+#          asset_name: circom-witnesscalc-linux-x86_64.tar.gz
+#          asset_content_type: application/gzip
+#
+#  build-windows:
+#    runs-on: windows-latest
+#    steps:
+#      - uses: actions/checkout@v4
+#        with:
+#          submodules: recursive
+#
+#      - name: Install Rust
+#        uses: actions-rs/toolchain@v1
+#        with:
+#          toolchain: stable
+#          override: true
+#
+#      - name: Build Windows libraries
+#        run: |
+#          cargo build --release
+#
+#      - name: Create library structure
+#        shell: bash
+#        run: |
+#          mkdir -p circom-witnesscalc/x86_64-pc-windows-msvc
+#
+#          cp target/release/build-circuit.exe circom-witnesscalc/x86_64-pc-windows-msvc/
+#          cp target/release/calc-witness.exe circom-witnesscalc/x86_64-pc-windows-msvc/
+#          cp target/release/circom_witnesscalc.lib circom-witnesscalc/x86_64-pc-windows-msvc/
+#          cp target/release/circom_witnesscalc.dll circom-witnesscalc/x86_64-pc-windows-msvc/
+#
+#      - name: Create Windows archive
+#        shell: bash
+#        run: tar -czf circom-witnesscalc-windows-x86_64.tar.gz circom-witnesscalc/
+#
+#      - name: Upload Windows artifacts
+#        uses: actions/upload-release-asset@v1
+#        env:
+#          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#        with:
+#          upload_url: ${{ github.event.release.upload_url }}
+#          asset_path: ./circom-witnesscalc-windows-x86_64.tar.gz
+#          asset_name: circom-witnesscalc-windows-x86_64.tar.gz
+#          asset_content_type: application/gzip
