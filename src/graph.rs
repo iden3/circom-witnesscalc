@@ -905,9 +905,8 @@ pub fn optimize<T: FieldOps + 'static, NS: NodesStorage + 'static>(
 
 pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>, NS: NodesStorage>(
     ff: F, nodes: &NS, inputs: &[T], outputs: &[usize],
-    constants: &[T]) -> Vec<T>
-where Vec<T>: FromIterator<<F as FieldOperations>::Type>
-{
+    constants: &[T]) -> (Vec<T>, Vec<T>)
+where Vec<T>: FromIterator<<F as FieldOperations>::Type> {
     // assert_valid(nodes);
 
     let start = Instant::now();
@@ -938,7 +937,7 @@ where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 
     let r = outputs.iter().map(|&i| values[i]).collect();
     println!("generic typed graph calculated in {:?}", start.elapsed());
-    r
+    (r, values)
 }
 
 // pub fn evaluate_parallel(nodes: &[Node], inputs: &[U256], outputs: &[usize]) -> Vec<U256> {
