@@ -30,7 +30,11 @@ where
         let signal_idx = path_to_signal_idx(path, input_infos, types)
             .ok_or_else(|| format!("signal {} is not found in input infos", path))?;
 
-        let local_idx = signal_idx - first_offset;
+        let local_idx = signal_idx.checked_sub(first_offset)
+            .ok_or_else(|| format!("signal {} is before input signal range", path))?;
+        if local_idx >= signals_set.len() {
+            return Err(format!("signal {} is outside input signal range", path).into());
+        }
         if signals_set[local_idx] {
             return Err(format!("duplicate signal at path {}", path).into());
         }
@@ -51,7 +55,7 @@ fn path_to_signal_idx(path: &str, input_infos: &[InputInfo], types: &[Type]) -> 
     // Handle root array: "[5]" -> first_offset + 5
     if path.starts_with('[') {
         if let Some(idx) = parse_root_array_index(path) {
-            return Some(input_infos.first()?.offset + idx);
+            return input_infos.first()?.offset.checked_add(idx);
         }
     }
 
@@ -69,7 +73,7 @@ fn path_to_signal_idx(path: &str, input_infos: &[InputInfo], types: &[Type]) -> 
         }
 
         if let Some(offset) = calculate_offset_from_suffix(suffix, info, types) {
-            return Some(info.offset + offset);
+            return info.offset.checked_add(offset);
         }
     }
 

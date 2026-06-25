@@ -1,5 +1,5 @@
 use std::io::{Cursor, Error, ErrorKind, Read};
-use crate::field::{FieldOperations, FieldOps, U254, U64};
+use crate::field::{bn254_prime, FieldOperations, FieldOps, U254, U64};
 use crate::graph::{Node, Nodes, NodesInterface, NodesStorage, Operation, TresOperation, UnoOperation, VecNodes};
 use crate::InputSignalsInfo;
 use crate::storage::{deserialize_input_signal_info, read_message, WriteBackReader, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
@@ -90,33 +90,26 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
         )
     };
 
-    let outer_nodes: Box<dyn NodesInterface> = match prime.bit_len() {
-        64 => {
-            let prime = U64::from_le_bytes(
-                &<U254 as FieldOps>::to_le_bytes(&prime))
-                .map_err(|err| {
-                    Error::new(
-                        ErrorKind::InvalidData,
-                        format!("Invalid 64-bit metadata prime: {}", err),
-                    )
-                })?;
+    let outer_nodes: Box<dyn NodesInterface> = match graph_prime_kind(prime) {
+        Some(GraphPrimeKind::Goldilocks) => {
+            let prime = U64::new(GOLDILOCKS_PRIME);
             let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
                 prime, curve_name, node_storage);
             decode_graph_nodes(bytes, idx, nodes_num, metadata_offset, &mut nodes)?;
             Box::new(nodes)
         }
-        254 => {
+        Some(GraphPrimeKind::Bn254) => {
             let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
                 prime, curve_name, node_storage);
             decode_graph_nodes(bytes, idx, nodes_num, metadata_offset, &mut nodes)?;
             Box::new(nodes)
         }
-        _ => {
+        None => {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("unknown prime {}", md.prime_str)));
+                format!("Unsupported graph prime {}", prime)));
         }
     };
 
@@ -148,6 +141,23 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     };
 
     Ok((outer_nodes, witness_signals, inputs_info))
+}
+
+const GOLDILOCKS_PRIME: u64 = 18446744069414584321;
+
+enum GraphPrimeKind {
+    Bn254,
+    Goldilocks,
+}
+
+fn graph_prime_kind(prime: U254) -> Option<GraphPrimeKind> {
+    if prime == bn254_prime {
+        Some(GraphPrimeKind::Bn254)
+    } else if prime == U254::from(GOLDILOCKS_PRIME) {
+        Some(GraphPrimeKind::Goldilocks)
+    } else {
+        None
+    }
 }
 
 fn read_u64_le(bytes: &[u8], offset: usize, context: &str) -> Result<u64, Error> {

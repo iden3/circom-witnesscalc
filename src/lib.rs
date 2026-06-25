@@ -314,10 +314,10 @@ fn checked_v2_input_layout(
         let base_type_size = match &info.type_id {
             None => 1,
             Some(type_id) => {
-                let ty = types.iter()
-                    .find(|ty| &ty.name == type_id)
+                let type_idx = types.iter()
+                    .position(|ty| &ty.name == type_id)
                     .ok_or_else(|| invalid_input_metadata("Unknown input type"))?;
-                checked_type_size(ty, types)?
+                checked_type_size_by_index(type_idx, types, &mut Vec::new())?
             }
         };
         let array_count = checked_product(&info.lengths, "input dimensions")?;
@@ -374,27 +374,52 @@ fn checked_component_input_count(
     Ok(())
 }
 
-fn checked_type_size(
-    ty: &vm2::Type,
+fn checked_type_size_by_index(
+    type_idx: usize,
     types: &[vm2::Type],
+    visiting: &mut Vec<usize>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    if type_idx >= types.len() {
+        return Err(invalid_input_metadata("Bus type index is out of range"));
+    }
+    if visiting.contains(&type_idx) {
+        return Err(invalid_input_metadata("Bus type metadata contains a cycle"));
+    }
+
+    visiting.push(type_idx);
+    let ty = &types[type_idx];
     let mut total_size = 0usize;
     for field in &ty.fields {
-        if let vm2::TypeFieldKind::Bus(bus_idx) = &field.kind {
-            if *bus_idx >= types.len() {
-                return Err(invalid_input_metadata("Bus type index is out of range"));
-            }
+        let base_type_size = checked_field_base_size(field, types, visiting)?;
+        if field.base_type_size != base_type_size {
+            return Err(invalid_input_metadata(
+                "Input metadata base_type_size is inconsistent with field type",
+            ));
         }
 
-        let dim_product = checked_product(&field.dims, "type field dimensions")?;
-        let field_size = if dim_product == 0 {
-            field.base_type_size
+        let field_size = if field.dims.is_empty() {
+            base_type_size
         } else {
-            checked_input_mul(field.base_type_size, dim_product, "type field size")?
+            let dim_product = checked_product(&field.dims, "type field dimensions")?;
+            checked_input_mul(base_type_size, dim_product, "type field size")?
         };
         total_size = checked_input_add(total_size, field_size, "type size")?;
     }
+    visiting.pop();
     Ok(total_size)
+}
+
+fn checked_field_base_size(
+    field: &vm2::TypeField,
+    types: &[vm2::Type],
+    visiting: &mut Vec<usize>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    match &field.kind {
+        vm2::TypeFieldKind::Ff => Ok(1),
+        vm2::TypeFieldKind::Bus(bus_idx) => {
+            checked_type_size_by_index(*bus_idx, types, visiting)
+        }
+    }
 }
 
 fn checked_product(
@@ -807,6 +832,63 @@ mod tests {
         assert!(result.unwrap().is_err());
     }
 
+    fn graph_with_v2_input_metadata(
+        input_info: &[crate::vm2::InputInfo],
+        types: &[crate::vm2::Type],
+    ) -> Vec<u8> {
+        use crate::graph::{Node, Nodes, NodesInterface, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        nodes.push_noopt(Node::Input(1));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[0], input_info, types).unwrap();
+        bytes
+    }
+
+    fn calc_witness_err(inputs_json: &str, wcd_data: &[u8]) -> String {
+        let result = panic::catch_unwind(|| super::calc_witness(inputs_json, wcd_data));
+        assert!(result.is_ok(), "calc_witness must not panic");
+        result.unwrap().unwrap_err().to_string()
+    }
+
+    #[test]
+    fn test_calc_witness_handles_graph_mod_by_zero() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let zero = nodes.const_node_idx_from_value(U254::from(0));
+        nodes.push_noopt(Node::Input(0));
+        nodes.push_noopt(Node::Op(Operation::Mod, 1, zero));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[2], &[], &[]).unwrap();
+
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+        assert!(result.is_ok(), "calc_witness must not panic");
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_graph_composite_prime() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let composite_prime = bn254_prime - U254::from(1);
+        let mut nodes = Nodes::new(composite_prime, "composite", VecNodes::new());
+        let four = nodes.const_node_idx_from_value(U254::from(4));
+        let two = nodes.const_node_idx_from_value(U254::from(2));
+        nodes.push_noopt(Node::Op(Operation::Div, four, two));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[2], &[], &[]).unwrap();
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("Unsupported graph prime"));
+    }
+
     #[test]
     fn test_graph_v1_input_metadata_overflow_returns_error() {
         let input_list: HashMap<String, Vec<U254>> = HashMap::new();
@@ -856,6 +938,80 @@ mod tests {
         let err = super::init_inputs_from_v2("{}", &ff, &input_info, &types)
             .unwrap_err();
         assert!(err.to_string().contains("Bus type index is out of range"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_nested_invalid_bus_index() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("outer".to_string()),
+        }];
+        let types = vec![
+            crate::vm2::Type {
+                name: "outer".to_string(),
+                fields: vec![crate::vm2::TypeField {
+                    name: "inner".to_string(),
+                    kind: crate::vm2::TypeFieldKind::Bus(1),
+                    offset: 0,
+                    base_type_size: 1,
+                    dims: vec![],
+                }],
+            },
+            crate::vm2::Type {
+                name: "inner".to_string(),
+                fields: vec![crate::vm2::TypeField {
+                    name: "bad".to_string(),
+                    kind: crate::vm2::TypeFieldKind::Bus(99),
+                    offset: 0,
+                    base_type_size: 1,
+                    dims: vec![],
+                }],
+            },
+        ];
+        let bytes = graph_with_v2_input_metadata(&input_info, &types);
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("Bus type index is out of range"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_type_base_size_desync() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("bus".to_string()),
+        }];
+        let types = vec![crate::vm2::Type {
+            name: "bus".to_string(),
+            fields: vec![crate::vm2::TypeField {
+                name: "x".to_string(),
+                kind: crate::vm2::TypeFieldKind::Ff,
+                offset: 0,
+                base_type_size: 2,
+                dims: vec![],
+            }],
+        }];
+        let bytes = graph_with_v2_input_metadata(&input_info, &types);
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("base_type_size"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_out_of_range_root_array_input() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![1],
+            type_id: None,
+        }];
+        let bytes = graph_with_v2_input_metadata(&input_info, &[]);
+
+        let err = calc_witness_err(r#"{"[999999]": "3"}"#, &bytes);
+        assert!(err.contains("outside input signal range"));
     }
 
     #[test]
