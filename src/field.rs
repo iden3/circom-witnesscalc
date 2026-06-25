@@ -272,6 +272,9 @@ pub const bn254_prime: U254 = uint!(21888242871839275222246405745257275088548364
 #[inline]
 fn mul_bn254_u254(a: U254, b: U254) -> U254 {
     debug_assert_eq!(fr_modulus_u254(), bn254_prime);
+    // Keep this guard mirrored with graph.rs::mul_bn254_u256.
+    // Noncanonical values can come from integer-style operations; keep those on
+    // the legacy path. The multi-limb check is only a performance gate.
     if a < bn254_prime && b < bn254_prime && is_multi_limb_u254(a) && is_multi_limb_u254(b) {
         fr_to_u254(u254_to_fr_canonical(a) * u254_to_fr_canonical(b))
     } else {
@@ -287,6 +290,7 @@ fn is_multi_limb_u254(v: U254) -> bool {
 
 #[inline]
 fn u254_to_fr_canonical(v: U254) -> Fr {
+    // Caller must ensure the value is canonical for Fr::from_bigint.
     debug_assert!(v < bn254_prime);
     Fr::from_bigint(BigInt(v.into_limbs())).unwrap()
 }

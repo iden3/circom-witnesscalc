@@ -55,6 +55,7 @@ impl Operation {
                     // division by zero
                     U256::ZERO
                 } else {
+                    // Division stays on the legacy path; inversion dominates.
                     a.mul_mod(b.inv_mod(M).unwrap(), M)
                 }
             },
@@ -87,6 +88,9 @@ impl Operation {
 #[inline]
 fn mul_bn254_u256(a: U256, b: U256) -> U256 {
     debug_assert_eq!(fr_modulus_u256(), M);
+    // Keep this guard mirrored with field.rs::mul_bn254_u254.
+    // Noncanonical values can come from integer-style operations; keep those on
+    // the legacy path. The multi-limb check is only a performance gate.
     if a < M && b < M && is_multi_limb_u256(a) && is_multi_limb_u256(b) {
         fr_to_u256(u256_to_fr_canonical(a) * u256_to_fr_canonical(b))
     } else {
@@ -102,6 +106,7 @@ fn is_multi_limb_u256(v: U256) -> bool {
 
 #[inline]
 fn u256_to_fr_canonical(v: U256) -> Fr {
+    // Caller must ensure the value is canonical for Fr::from_bigint.
     debug_assert!(v < M);
     Fr::from_bigint(BigInt(v.into_limbs())).unwrap()
 }
