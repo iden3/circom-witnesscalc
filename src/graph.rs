@@ -7,6 +7,8 @@ use std::fs::File;
 use std::ops::{BitOr, BitXor, Not};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
+use ark_bn254::Fr;
+use ark_ff::{BigInt, PrimeField};
 use crate::field::{Field, FieldOperations, FieldOps, M};
 use rand::{RngCore};
 use ruint::aliases::U256;
@@ -45,7 +47,7 @@ impl Operation {
     pub fn eval(&self, a: U256, b: U256) -> U256 {
         use Operation::*;
         match self {
-            Mul => a.mul_mod(b, M),
+            Mul => mul_bn254_u256(a, b),
             Div => {
                 if b == U256::ZERO {
                     // as we are simulating a circuit execution with signals
@@ -80,6 +82,38 @@ impl Operation {
             Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
         }
     }
+}
+
+#[inline]
+fn mul_bn254_u256(a: U256, b: U256) -> U256 {
+    debug_assert_eq!(fr_modulus_u256(), M);
+    if a < M && b < M && is_multi_limb_u256(a) && is_multi_limb_u256(b) {
+        fr_to_u256(u256_to_fr_canonical(a) * u256_to_fr_canonical(b))
+    } else {
+        a.mul_mod(b, M)
+    }
+}
+
+#[inline]
+fn is_multi_limb_u256(v: U256) -> bool {
+    let limbs = v.into_limbs();
+    limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0
+}
+
+#[inline]
+fn u256_to_fr_canonical(v: U256) -> Fr {
+    debug_assert!(v < M);
+    Fr::from_bigint(BigInt(v.into_limbs())).unwrap()
+}
+
+#[inline]
+fn fr_to_u256(v: Fr) -> U256 {
+    U256::from_limbs(v.into_bigint().0)
+}
+
+#[inline]
+fn fr_modulus_u256() -> U256 {
+    U256::from_limbs(<Fr as PrimeField>::MODULUS.0)
 }
 
 impl From<&Operation> for crate::proto::DuoOp {
@@ -1434,6 +1468,35 @@ mod tests {
     use crate::field::U254;
 
     #[test]
+    fn test_bn254_graph_fr_conversion_invariants() {
+        assert_eq!(fr_modulus_u256(), M);
+        let conversion_values = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(u64::MAX),
+            U256::from(1u64) << 64,
+            (U256::from(1u64) << 64) + U256::from(1u64),
+            U256::from(1u64) << 128,
+            U256::from(1u64) << 192,
+            M - U256::from(2u64),
+            M - U256::from(1u64),
+        ];
+
+        for value in conversion_values {
+            assert_eq!(
+                fr_to_u256(u256_to_fr_canonical(value)),
+                value,
+                "Fr conversion roundtrip for {value}"
+            );
+        }
+
+        assert!(!is_multi_limb_u256(U256::ZERO));
+        assert!(!is_multi_limb_u256(U256::from(u64::MAX)));
+        assert!(is_multi_limb_u256(U256::from(1u64) << 64));
+        assert!(is_multi_limb_u256(M - U256::from(1u64)));
+    }
+
+    #[test]
     fn test_ok() {
         let prime = U254::from_str_radix(
             "21888242871839275222246405745257275088548364400416034343698204186575808495617",
@@ -1444,6 +1507,101 @@ mod tests {
         // println!("{}", rnd::<U254>());
         // let y = rng.gen::<[u8; 3]>();
         println!("{:?}", y);
+    }
+
+    #[test]
+    fn test_mul_matches_u256_modular_multiplication() {
+        let half = M >> 1;
+        let edge_values = [
+            U256::ZERO,
+            U256::from(1u64),
+            U256::from(2u64),
+            U256::from(u64::MAX),
+            U256::from(1u64) << 64,
+            (U256::from(1u64) << 64) + U256::from(1u64),
+            U256::from(1u64) << 128,
+            U256::from(1u64) << 192,
+            half - U256::from(1u64),
+            half,
+            half + U256::from(1u64),
+            M - U256::from(2u64),
+            M - U256::from(1u64),
+            M,
+            M + U256::from(1u64),
+            U256::from(1u64) << 253,
+            (U256::from(1u64) << 254) - U256::from(1u64),
+            U256::MAX,
+        ];
+
+        for a in edge_values {
+            for b in edge_values {
+                assert_mul_matches_u256_modular_multiplication(a, b);
+            }
+        }
+
+        let cases = [
+            (U256::ZERO, U256::ZERO),
+            (U256::from(2u64), U256::from(3u64)),
+            (M - U256::from(1u64), M - U256::from(1u64)),
+            (M, M + U256::from(1u64)),
+            (U256::MAX, M - U256::from(1u64)),
+            (
+                uint!(18583076334226168172367231819260574371431472897769128993835383390508861945746_U256),
+                uint!(69475253542389717254142591005212744711961990799384338423674550404747877783961_U256),
+            ),
+        ];
+
+        for (a, b) in cases {
+            assert_mul_matches_u256_modular_multiplication(a, b);
+        }
+
+        let mut state = 0x9e3779b97f4a7c15u64;
+        for _ in 0..256 {
+            let a = U256::from_limbs([
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+            ]) % M;
+            let b = U256::from_limbs([
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+            ]) % M;
+            assert_mul_matches_u256_modular_multiplication(a, b);
+        }
+
+        for _ in 0..256 {
+            let a = U256::from_limbs([
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+            ]);
+            let b = U256::from_limbs([
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+                next_test_u64(&mut state),
+            ]);
+            assert_mul_matches_u256_modular_multiplication(a, b);
+        }
+    }
+
+    fn assert_mul_matches_u256_modular_multiplication(a: U256, b: U256) {
+        assert_eq!(
+            Operation::Mul.eval(a, b),
+            a.mul_mod(b, M),
+            "Operation::Mul.eval({a}, {b})"
+        );
+    }
+
+    fn next_test_u64(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
     }
 
     #[test]
