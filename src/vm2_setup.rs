@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use crate::field::{FieldOperations, FieldOps};
-use crate::vm2::{Component, InputInfo, InputInfoSliceExt, Template, Type, TypeFieldKind};
+use crate::vm2::{Component, InputInfo, InputInfoSliceExt, RuntimeError, Template, Type, TypeFieldKind};
 
 /// Initialize signals array with input values from JSON
 pub fn init_signals<T: FieldOps, F>(
@@ -367,18 +367,24 @@ fn calculate_bus_total_size(bus_type: &Type, types: &[Type]) -> usize {
 
 /// Build the component tree for VM2 execution
 pub fn build_component_tree<T: FieldOps>(
-    main_template_id: usize, vm_templates: &[Template]) -> Component<T> {
+    main_template_id: usize, vm_templates: &[Template]) -> Result<Component<T>, RuntimeError> {
 
-    create_component(main_template_id, 1, vm_templates).0
+    Ok(create_component(main_template_id, 1, vm_templates)?.0)
 }
 
 /// Create a component tree and returns the component and the number of signals
-/// of self and all its children
+/// of self and all its children.
+///
+/// `template_id` and every subcomponent id come from the decoded artifact and
+/// are not trusted, so each is bounds-checked against `vm_templates` before
+/// indexing. Once validated here, downstream code can index `templates` by the
+/// component's `template_id` without further checks.
 fn create_component<T: FieldOps>(
     template_id: usize,
-    signals_start: usize, vm_templates: &[Template]) -> (Component<T>, usize) {
+    signals_start: usize, vm_templates: &[Template]) -> Result<(Component<T>, usize), RuntimeError> {
 
-    let t = &vm_templates[template_id];
+    let t = vm_templates.get(template_id)
+        .ok_or(RuntimeError::InvalidTemplateId(template_id))?;
     let mut next_signal_start = signals_start + t.signals_num;
     let mut components = Vec::with_capacity(t.components.len());
     for cmp_tmpl_id in t.components.iter() {
@@ -386,13 +392,13 @@ fn create_component<T: FieldOps>(
             None => None,
             Some( tmpl_id ) => {
                 let (c, signals_num) = create_component(
-                    *tmpl_id, next_signal_start, vm_templates);
+                    *tmpl_id, next_signal_start, vm_templates)?;
                 next_signal_start += signals_num;
                 Some(Arc::new(RwLock::new(c)))
             }
         });
     }
-    (
+    Ok((
         Component::new(
             signals_start,
             template_id,
@@ -400,7 +406,7 @@ fn create_component<T: FieldOps>(
             t.number_of_inputs,
             t.signals_num),
         next_signal_start - signals_start
-    )
+    ))
 }
 
 fn parse_signals_json<T: FieldOps, F>(
@@ -616,7 +622,7 @@ mod tests {
             template7];
 
         // Build component tree with template7 (Root) as the main template
-        let component_tree: Component<U254> = build_component_tree(6, &vm_templates);
+        let component_tree: Component<U254> = build_component_tree(6, &vm_templates).unwrap();
 
         // Verify the structure of the root component
         assert_eq!(component_tree.signals_start, 1);
@@ -666,6 +672,32 @@ mod tests {
         assert_eq!(leaf4.template_id, 3);
         assert_eq!(leaf4.number_of_inputs, 1);
         assert_eq!(leaf4.components.len(), 0);
+    }
+
+    #[test]
+    fn test_build_component_tree_rejects_invalid_template_id() {
+        // A malformed artifact can carry a main_template_id (or subcomponent id)
+        // that points past the end of the templates table. Building the tree
+        // must surface an error rather than panic while indexing.
+        let empty: Vec<Template> = vec![];
+        assert!(matches!(
+            build_component_tree::<U254>(0, &empty),
+            Err(RuntimeError::InvalidTemplateId(0))));
+
+        let parent = Template {
+            name: "Parent".to_string(),
+            code: vec![],
+            signals_num: 1,
+            number_of_inputs: 0,
+            components: vec![Some(7)], // dangling subcomponent id
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+        assert!(matches!(
+            build_component_tree::<U254>(0, std::slice::from_ref(&parent)),
+            Err(RuntimeError::InvalidTemplateId(7))));
     }
 
     #[test]

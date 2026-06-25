@@ -306,7 +306,7 @@ fn test_heterogeneous_bus(){
     let ff = Field::new(bn254_prime);
     let circuit = deserialize_witnesscalc_vm2_body(&mut wcd_reader, ff.clone()).unwrap();
     let component_tree: Component<U254> = build_component_tree(
-        circuit.main_template_id, &circuit.templates);
+        circuit.main_template_id, &circuit.templates).unwrap();
     assert_eq!(8,
         component_tree.components[0].as_ref().unwrap().read().unwrap().number_of_inputs);
 }

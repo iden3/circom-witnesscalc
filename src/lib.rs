@@ -495,7 +495,7 @@ pub fn calculate_witness_vm2<T: FieldOps>(
     mut w: impl std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
 
     let mut component_tree = build_component_tree(
-        circuit.main_template_id, &circuit.templates);
+        circuit.main_template_id, &circuit.templates)?;
 
     init_signals(
         inputs_json, &circuit.field, &circuit.types, &circuit.input_infos,
@@ -602,6 +602,31 @@ mod tests {
         for (key, value) in &inputs {
             assert_eq!(want.get(key), Some(value), "Mismatch at key: {}", key);
         }
+    }
+
+    #[test]
+    fn calc_witness_rejects_out_of_range_main_template() {
+        // A well-formed-but-malicious artifact: it decodes cleanly, yet its
+        // main_template_id points past the (empty) templates table. calc_witness
+        // must return an error instead of panicking inside the interpreter.
+        let ff = Field::new(bn254_prime);
+        let circuit = crate::vm2::Circuit {
+            main_template_id: 0,
+            templates: vec![],
+            functions: vec![],
+            function_registry: HashMap::new(),
+            field: ff,
+            witness: vec![],
+            signals_num: 0,
+            input_infos: vec![],
+            types: vec![],
+        };
+        let mut artifact = Vec::new();
+        crate::storage::serialize_witnesscalc_vm2(&mut artifact, &circuit).unwrap();
+
+        let err = super::calc_witness("{}", &artifact).unwrap_err();
+        assert!(err.to_string().contains("Invalid template ID"),
+            "expected the template-id guard to reject it, got: {err}");
     }
 
     #[test]
