@@ -11,7 +11,7 @@ program_structure = { git = "https://github.com/iden3/circom.git", branch = "mas
 code_producers = { git = "https://github.com/iden3/circom.git", branch = "master" }
 type_analysis = { git = "https://github.com/iden3/circom.git", branch = "master" }
 parser = { git = "https://github.com/iden3/circom.git", branch = "master" }
-indicatif = "0.17.11"
+indicatif = "0.18.4"
 ruint = { version = "1.13.1", features = ["rand", "serde", "num-traits"] }
 circom-witnesscalc = { path = "../.." }
 
