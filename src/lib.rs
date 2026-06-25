@@ -630,4 +630,31 @@ mod tests {
             U254::from(3)]);
         assert_eq!(res, want);
     }
+
+    #[test]
+    fn test_wtns_modulus_le_encoding() {
+        use ark_bn254::Fr;
+        use ark_ff::{BigInteger, PrimeField};
+        use std::io::Cursor;
+
+        // wtns_from_witness derives the .wtns prime header from
+        // Fr::MODULUS.to_bytes_le(); confirm Arkworks still yields the
+        // 32-byte little-endian BN254 scalar field modulus and that it
+        // matches the prime defined in the field module.
+        let modulus_le = Fr::MODULUS.to_bytes_le();
+        assert_eq!(modulus_le.len(), 32);
+        assert_eq!(modulus_le, bn254_prime.to_le_bytes_vec());
+
+        // The public witness encoder must emit a valid version-2 .wtns
+        // buffer whose field-size section carries that same modulus.
+        let wtns = super::wtns_from_u256_witness(vec![U256::from(1u64), U256::from(7u64)]);
+        let parsed = wtns_file::WtnsFile::<32>::read(Cursor::new(&wtns)).unwrap();
+        assert_eq!(parsed.version, 2);
+        assert_eq!(parsed.header.field_size, 32);
+        assert_eq!(parsed.header.prime.as_bytes(), modulus_le.as_slice());
+        assert_eq!(parsed.header.witness_len, 2);
+        assert_eq!(parsed.witness.0.len(), 2);
+        assert_eq!(parsed.witness.0[0].as_bytes(), U256::from(1u64).as_le_slice());
+        assert_eq!(parsed.witness.0[1].as_bytes(), U256::from(7u64).as_le_slice());
+    }
 }
