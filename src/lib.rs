@@ -181,7 +181,7 @@ fn calc_witness_graph(
 
     let start = std::time::Instant::now();
     let (nodes, signals, input_info): (Box<dyn NodesInterface>, Vec<usize>, InputInfo) =
-        deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
+        deserialize_witnesscalc_graph_from_bytes(graph_data)?;
     println!("Graph loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
@@ -573,11 +573,13 @@ fn witness<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::panic;
     use prost::Message;
     use ruint::aliases::U256;
     use ruint::uint;
     use crate::proto::InputNode;
     use crate::field::{Field, U254, bn254_prime};
+    use crate::storage::WITNESSCALC_GRAPH_MAGIC_002;
 
     #[test]
     fn test_ok() {
@@ -629,5 +631,14 @@ mod tests {
             U254::from(2),
             U254::from(3)]);
         assert_eq!(res, want);
+    }
+
+    #[test]
+    fn test_calc_witness_returns_error_for_truncated_graph_artifact() {
+        let bytes = WITNESSCALC_GRAPH_MAGIC_002.to_vec();
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
     }
 }
