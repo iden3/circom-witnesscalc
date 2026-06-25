@@ -478,10 +478,10 @@ pub fn calc_witness_vm2_buf(
     let mut reader = std::io::Cursor::new(&compiled_bytecode);
     let inputs_reader = std::io::Cursor::new(
         inputs_json.as_bytes());
-    let prime = read_witnesscalc_vm2_header(&mut reader).unwrap();
+    let prime = read_witnesscalc_vm2_header(&mut reader)?;
     if prime == num_bigint::BigUint::from_bytes_le(&bn254_prime.to_le_bytes_vec()) {
         let ff = Field::new(bn254_prime);
-        let circuit = deserialize_witnesscalc_vm2_body(&mut reader, ff).unwrap();
+        let circuit = deserialize_witnesscalc_vm2_body(&mut reader, ff)?;
         let mut witness_buf: Vec<u8> = Vec::new();
         calculate_witness_vm2(&circuit, inputs_reader, &mut witness_buf)?;
         Ok(witness_buf)
