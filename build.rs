@@ -1,21 +1,9 @@
-use std::io::Result;
-use std::path::Path;
-
-fn main() -> Result<()> {
-    // Generate protobuf bindings
-    let empty_array: &[&Path] = &[];
-    println!("cargo:rerun-if-changed=protos/messages.proto");
-    prost_build::compile_protos(&["protos/messages.proto"], empty_array)?;
-    println!("cargo:rerun-if-changed=protos/vm.proto");
-    prost_build::compile_protos(&["protos/vm.proto"], empty_array)?;
-
+fn main() {
     if let Ok(target_os) = std::env::var("CARGO_CFG_TARGET_OS") {
         if target_os == "android" {
             setup_android_environment()
         }
     }
-
-    Ok(())
 }
 
 fn setup_android_environment() {

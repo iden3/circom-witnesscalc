@@ -53,8 +53,5 @@ codegen-units = 1
 [lib]
 crate-type = ["lib", "staticlib", "cdylib"]
 
-[build-dependencies]
-prost-build = "0.13.3"
-
 [workspace]
 members = ["extensions/build-circuit", "extensions/compiler"]
