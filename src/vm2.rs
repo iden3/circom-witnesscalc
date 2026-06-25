@@ -576,6 +576,8 @@ pub enum RuntimeError {
     UnknownArgumentType(u8),
     #[error("Invalid template ID: {0}")]
     InvalidTemplateId(usize),
+    #[error("Component graph is cyclic or nested beyond the template count")]
+    CyclicComponentGraph,
     #[error("Signal ID {0} is out of bounds (max {1})")]
     SignalIdOutOfBounds(usize, usize),
     #[error("Dimension index {0} is out of bounds (signal has {1} dimensions)")]

@@ -369,23 +369,62 @@ fn calculate_bus_total_size(bus_type: &Type, types: &[Type]) -> usize {
 pub fn build_component_tree<T: FieldOps>(
     main_template_id: usize, vm_templates: &[Template]) -> Result<Component<T>, RuntimeError> {
 
+    validate_component_graph(main_template_id, vm_templates)?;
+
     Ok(create_component(main_template_id, 1, vm_templates)?.0)
+}
+
+/// Validate the reachable component graph before constructing it.
+///
+/// Template ids are decoded from untrusted artifacts, so every edge is
+/// bounds-checked before construction. A repeated template on the current path
+/// means a component cycle; shared acyclic children are allowed.
+fn validate_component_graph(
+    main_template_id: usize, vm_templates: &[Template]) -> Result<(), RuntimeError> {
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark { Unvisited, OnPath, Done }
+
+    fn walk(
+        template_id: usize, vm_templates: &[Template],
+        marks: &mut [Mark]) -> Result<(), RuntimeError> {
+
+        let template = vm_templates.get(template_id)
+            .ok_or(RuntimeError::InvalidTemplateId(template_id))?;
+        match marks[template_id] {
+            Mark::Done => return Ok(()),
+            Mark::OnPath => return Err(RuntimeError::CyclicComponentGraph),
+            Mark::Unvisited => {}
+        }
+
+        marks[template_id] = Mark::OnPath;
+        for child_template_id in template.components.iter().flatten() {
+            walk(*child_template_id, vm_templates, marks)?;
+        }
+        marks[template_id] = Mark::Done;
+
+        Ok(())
+    }
+
+    let mut marks = vec![Mark::Unvisited; vm_templates.len()];
+    walk(main_template_id, vm_templates, &mut marks)
 }
 
 /// Create a component tree and returns the component and the number of signals
 /// of self and all its children.
 ///
-/// `template_id` and every subcomponent id come from the decoded artifact and
-/// are not trusted, so each is bounds-checked against `vm_templates` before
-/// indexing. Once validated here, downstream code can index `templates` by the
-/// component's `template_id` without further checks.
+/// `build_component_tree` validates the reachable template ids and component
+/// graph first. Construction still checks arithmetic on decoded signal counts so
+/// malformed metadata returns an error instead of panicking or wrapping.
 fn create_component<T: FieldOps>(
     template_id: usize,
     signals_start: usize, vm_templates: &[Template]) -> Result<(Component<T>, usize), RuntimeError> {
 
     let t = vm_templates.get(template_id)
         .ok_or(RuntimeError::InvalidTemplateId(template_id))?;
-    let mut next_signal_start = signals_start + t.signals_num;
+    let mut next_signal_start = signals_start
+        .checked_add(t.signals_num)
+        .ok_or(RuntimeError::OperationOverflows)?;
     let mut components = Vec::with_capacity(t.components.len());
     for cmp_tmpl_id in t.components.iter() {
         components.push(match cmp_tmpl_id {
@@ -393,11 +432,16 @@ fn create_component<T: FieldOps>(
             Some( tmpl_id ) => {
                 let (c, signals_num) = create_component(
                     *tmpl_id, next_signal_start, vm_templates)?;
-                next_signal_start += signals_num;
+                next_signal_start = next_signal_start
+                    .checked_add(signals_num)
+                    .ok_or(RuntimeError::OperationOverflows)?;
                 Some(Arc::new(RwLock::new(c)))
             }
         });
     }
+    let total_signals = next_signal_start
+        .checked_sub(signals_start)
+        .ok_or(RuntimeError::OperationOverflows)?;
     Ok((
         Component::new(
             signals_start,
@@ -405,7 +449,7 @@ fn create_component<T: FieldOps>(
             components,
             t.number_of_inputs,
             t.signals_num),
-        next_signal_start - signals_start
+        total_signals
     ))
 }
 
@@ -698,6 +742,109 @@ mod tests {
         assert!(matches!(
             build_component_tree::<U254>(0, std::slice::from_ref(&parent)),
             Err(RuntimeError::InvalidTemplateId(7))));
+    }
+
+    #[test]
+    fn test_build_component_tree_rejects_cyclic_components() {
+        // Every id is in range, but the template instantiates itself, which would
+        // recurse forever. Component graph validation must turn this into an
+        // error before construction starts.
+        let recursive = Template {
+            name: "Recursive".to_string(),
+            code: vec![],
+            signals_num: 1,
+            number_of_inputs: 0,
+            components: vec![Some(0)], // points at itself
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+        assert!(matches!(
+            build_component_tree::<U254>(0, std::slice::from_ref(&recursive)),
+            Err(RuntimeError::CyclicComponentGraph)));
+    }
+
+    #[test]
+    fn test_build_component_tree_rejects_cycle_before_signal_sizing() {
+        // A self-cycle must be rejected from the current path before component
+        // construction sizes signals. Unused templates should not buy a
+        // malicious cycle more recursion depth or let decoded signal counts
+        // overflow first.
+        let mut templates = vec![Template {
+            name: "Recursive".to_string(),
+            code: vec![],
+            signals_num: usize::MAX,
+            number_of_inputs: 0,
+            components: vec![Some(0)], // points at itself
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        }];
+        for idx in 0..4 {
+            templates.push(Template {
+                name: format!("Unused{idx}"),
+                code: vec![],
+                signals_num: 1,
+                number_of_inputs: 0,
+                components: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                ff_variable_names: vec![],
+                i64_variable_names: vec![],
+            });
+        }
+
+        assert!(matches!(
+            build_component_tree::<U254>(0, &templates),
+            Err(RuntimeError::CyclicComponentGraph)));
+    }
+
+    #[test]
+    fn test_build_component_tree_rejects_signal_offset_overflow() {
+        let oversized = Template {
+            name: "Oversized".to_string(),
+            code: vec![],
+            signals_num: usize::MAX,
+            number_of_inputs: 0,
+            components: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+
+        assert!(matches!(
+            build_component_tree::<U254>(0, std::slice::from_ref(&oversized)),
+            Err(RuntimeError::OperationOverflows)));
+
+        let parent = Template {
+            name: "Parent".to_string(),
+            code: vec![],
+            signals_num: 1,
+            number_of_inputs: 0,
+            components: vec![Some(1)],
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+        let child = Template {
+            name: "Child".to_string(),
+            code: vec![],
+            signals_num: usize::MAX - 1,
+            number_of_inputs: 0,
+            components: vec![],
+            inputs: vec![],
+            outputs: vec![],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+
+        assert!(matches!(
+            build_component_tree::<U254>(0, &[parent, child]),
+            Err(RuntimeError::OperationOverflows)));
     }
 
     #[test]
