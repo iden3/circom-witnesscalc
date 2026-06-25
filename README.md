@@ -47,7 +47,9 @@ cargo run --package circom-witnesscalc --bin build-circuit <path_to_circuit.circ
 
 Run `./build-circuit --help` to see the available options.
 
-To build on Ubuntu you need to install `clang-19` and `protobuf-compiler` packages.
+The crate builds on a stock Rust toolchain with no extra system packages for
+protobuf or C binding generation. The protobuf Rust types and C FFI bindings
+(`src/proto/` and `src/bindings.rs`) are committed.
 
 ## Calculate witness from circuit graph created on previous step
 
@@ -124,12 +126,10 @@ It may be somewhere like `~/Library/Android/sdk/ndk/26.2.11394342`.
 ```shell
 CC=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/darwin-x86_64/bin/aarch64-linux-android29-clang \
 CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=${CC} \
-CLANG_PATH=${CC} \
 cargo build --target aarch64-linux-android --release
 
 CC=${ANDROID_NDK_ROOT}/toolchains/llvm/prebuilt/darwin-x86_64/bin/x86_64-linux-android29-clang \
 CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=${CC} \
-CLANG_PATH=${CC} \
 cargo build --target x86_64-linux-android --release
 ```
 
