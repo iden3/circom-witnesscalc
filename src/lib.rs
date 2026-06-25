@@ -29,7 +29,7 @@ use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_byte
 use crate::storage::{deserialize_witnesscalc_vm2_body, read_witnesscalc_vm2_header, WITNESSCALC_CVM_MAGIC, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
 use crate::vm2::{execute, Circuit, Component};
 use crate::vm2::InputInfoSliceExt;
-use crate::vm2_setup::{build_component_tree, init_signals};
+use crate::vm2_setup::{build_component_tree, init_signals, validate_types};
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
@@ -494,6 +494,8 @@ pub fn calculate_witness_vm2<T: FieldOps>(
     circuit: &Circuit<T>, inputs_json: impl std::io::Read,
     mut w: impl std::io::Write) -> Result<(), Box<dyn std::error::Error>> {
 
+    validate_types(&circuit.types, &circuit.templates)?;
+
     let mut component_tree = build_component_tree(
         circuit.main_template_id, &circuit.templates)?;
 
@@ -627,6 +629,50 @@ mod tests {
         let err = super::calc_witness("{}", &artifact).unwrap_err();
         assert!(err.to_string().contains("Invalid template ID"),
             "expected the template-id guard to reject it, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_cyclic_bus_type() {
+        // The artifact decodes cleanly, but its bus type contains a field of its
+        // own type. Sizing a signal of that type would recurse forever, so
+        // calc_witness must reject it instead of overflowing the stack.
+        let ff = Field::new(bn254_prime);
+        let circuit = crate::vm2::Circuit {
+            main_template_id: 0,
+            templates: vec![crate::vm2::Template {
+                name: "Main".to_string(),
+                code: vec![],
+                signals_num: 1,
+                number_of_inputs: 0,
+                components: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                ff_variable_names: vec![],
+                i64_variable_names: vec![],
+            }],
+            functions: vec![],
+            function_registry: HashMap::new(),
+            field: ff,
+            witness: vec![],
+            signals_num: 1,
+            input_infos: vec![],
+            types: vec![crate::vm2::Type {
+                name: "b".to_string(),
+                fields: vec![crate::vm2::TypeField {
+                    name: "f".to_string(),
+                    kind: crate::vm2::TypeFieldKind::Bus(0),
+                    offset: 0,
+                    base_type_size: 1,
+                    dims: vec![],
+                }],
+            }],
+        };
+        let mut artifact = Vec::new();
+        crate::storage::serialize_witnesscalc_vm2(&mut artifact, &circuit).unwrap();
+
+        let err = super::calc_witness("{}", &artifact).unwrap_err();
+        assert!(err.to_string().contains("cycle"),
+            "expected the bus-type cycle guard to reject it, got: {err}");
     }
 
     #[test]

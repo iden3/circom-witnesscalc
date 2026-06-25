@@ -671,6 +671,8 @@ pub enum RuntimeError {
     DimensionIndexOutOfBounds(usize, usize),
     #[error("Invalid type ID: {0}")]
     InvalidTypeId(usize),
+    #[error("Bus type table contains a cycle")]
+    CyclicBusType,
     #[error("Invalid field ID: {1}, type ID: {0}")]
     InvalidFieldId(usize, usize),
     #[error("Operation overflows")]

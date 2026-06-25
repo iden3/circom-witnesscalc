@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::sync::{Arc, RwLock};
 use crate::field::{FieldOperations, FieldOps};
-use crate::vm2::{Component, InputInfo, InputInfoSliceExt, RuntimeError, Template, Type, TypeFieldKind};
+use crate::vm2::{Component, InputInfo, InputInfoSliceExt, RuntimeError, Signal, Template, Type, TypeFieldKind};
 
 /// Initialize signals array with input values from JSON
 pub fn init_signals<T: FieldOps, F>(
@@ -453,6 +453,63 @@ fn create_component<T: FieldOps>(
     ))
 }
 
+/// Validate the decoded bus-type references before they are used to size signals.
+///
+/// Every index into the `types` table comes from the untrusted artifact: bus
+/// types reference each other through `Bus(idx)` fields, and template signals
+/// reference a bus type through `Signal::Bus(idx, _)`. Each such index must be in
+/// range, and no bus type may transitively contain itself: such a cycle would
+/// make the type's size infinite and send the recursive size helpers
+/// (`calculate_bus_total_size`) into unbounded recursion. Checking once here lets
+/// the size helpers index `types` and recurse without further guards.
+pub fn validate_types(types: &[Type], templates: &[Template]) -> Result<(), RuntimeError> {
+    // Three-colour DFS over the "field of bus type" graph. `Done` memoizes types
+    // already proven acyclic so a shared subtype is not re-walked (which would be
+    // exponential on a deeply shared graph); `OnPath` marks the current stack, so
+    // re-entering an `OnPath` type is a back edge, i.e. a cycle.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mark { Unvisited, OnPath, Done }
+
+    fn walk(idx: usize, types: &[Type], marks: &mut [Mark]) -> Result<(), RuntimeError> {
+        match marks[idx] {
+            Mark::Done => return Ok(()),
+            Mark::OnPath => return Err(RuntimeError::CyclicBusType),
+            Mark::Unvisited => {}
+        }
+        marks[idx] = Mark::OnPath;
+        for field in &types[idx].fields {
+            if let TypeFieldKind::Bus(bus_idx) = field.kind {
+                if bus_idx >= types.len() {
+                    return Err(RuntimeError::InvalidTypeId(bus_idx));
+                }
+                walk(bus_idx, types, marks)?;
+            }
+        }
+        marks[idx] = Mark::Done;
+        Ok(())
+    }
+
+    let mut marks = vec![Mark::Unvisited; types.len()];
+    for idx in 0..types.len() {
+        walk(idx, types, &mut marks)?;
+    }
+
+    // Template input/output signals carry their own bus type index, decoded
+    // separately from the table walked above and indexed unchecked by
+    // `calculate_signal_size`.
+    for template in templates {
+        for signal in template.inputs.iter().chain(template.outputs.iter()) {
+            if let Signal::Bus(type_idx, _) = signal {
+                if *type_idx >= types.len() {
+                    return Err(RuntimeError::InvalidTypeId(*type_idx));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn parse_signals_json<T: FieldOps, F>(
     inputs_data: impl std::io::Read,
     ff: &F) -> Result<HashMap<String, T>, Box<dyn std::error::Error>>
@@ -845,6 +902,68 @@ mod tests {
         assert!(matches!(
             build_component_tree::<U254>(0, &[parent, child]),
             Err(RuntimeError::OperationOverflows)));
+    }
+
+    #[test]
+    fn test_validate_types() {
+        use crate::vm2::TypeField;
+
+        let ff_field = |name: &str| TypeField {
+            name: name.to_string(), kind: TypeFieldKind::Ff,
+            offset: 0, base_type_size: 1, dims: vec![],
+        };
+        let bus_field = |name: &str, idx: usize| TypeField {
+            name: name.to_string(), kind: TypeFieldKind::Bus(idx),
+            offset: 0, base_type_size: 1, dims: vec![],
+        };
+        let ty = |name: &str, fields: Vec<TypeField>| Type {
+            name: name.to_string(), fields,
+        };
+
+        // Acyclic nesting (outer contains inner) is accepted.
+        let ok = vec![
+            ty("inner", vec![ff_field("x")]),
+            ty("outer", vec![bus_field("i", 0)]),
+        ];
+        assert!(validate_types(&ok, &[]).is_ok());
+
+        // A field referencing a type past the end of the table is rejected.
+        let dangling = vec![ty("b", vec![bus_field("f", 5)])];
+        assert!(matches!(
+            validate_types(&dangling, &[]),
+            Err(RuntimeError::InvalidTypeId(5))));
+
+        // A bus type that transitively contains itself is rejected rather than
+        // recursing forever.
+        let direct_cycle = vec![ty("b", vec![bus_field("f", 0)])];
+        assert!(matches!(
+            validate_types(&direct_cycle, &[]),
+            Err(RuntimeError::CyclicBusType)));
+
+        let indirect_cycle = vec![
+            ty("a", vec![bus_field("f", 1)]),
+            ty("b", vec![bus_field("f", 0)]),
+        ];
+        assert!(matches!(
+            validate_types(&indirect_cycle, &[]),
+            Err(RuntimeError::CyclicBusType)));
+
+        // A template output signal whose bus type index is out of range is also
+        // rejected, even when the type table itself is well-formed (here empty).
+        let signal_template = Template {
+            name: "T".to_string(),
+            code: vec![],
+            signals_num: 1,
+            number_of_inputs: 0,
+            components: vec![],
+            inputs: vec![],
+            outputs: vec![Signal::Bus(9, vec![])],
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        };
+        assert!(matches!(
+            validate_types(&[], std::slice::from_ref(&signal_template)),
+            Err(RuntimeError::InvalidTypeId(9))));
     }
 
     #[test]
