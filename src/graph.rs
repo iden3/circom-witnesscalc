@@ -982,7 +982,7 @@ fn invalid_graph(msg: String) -> std::io::Error {
 /// Graph artifacts are untrusted, so a malformed index must surface as an
 /// error here rather than an out-of-bounds panic inside [`evaluate`], whose
 /// hot loop indexes these values directly.
-pub fn validate_node_indices<NS: NodesStorage>(
+pub(crate) fn validate_node_indices<NS: NodesStorage>(
     nodes: &NS, num_inputs: usize, num_constants: usize,
     outputs: &[usize]) -> std::io::Result<()> {
 

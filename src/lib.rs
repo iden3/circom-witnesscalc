@@ -28,7 +28,6 @@ use crate::field::{bn254_prime, Field, FieldOperations, FieldOps, U254, U64};
 use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
 use crate::storage::{deserialize_witnesscalc_vm2_body, read_witnesscalc_vm2_header, WITNESSCALC_CVM_MAGIC, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
 use crate::vm2::{execute, Circuit, Component};
-use crate::vm2::InputInfoSliceExt;
 use crate::vm2_setup::{build_component_tree, init_signals};
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
@@ -43,6 +42,10 @@ pub mod proto {
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 // include!("bindings.rs");
+
+// Graph V2 input metadata is untrusted; cap the temporary component used to
+// parse inputs before Component::new performs infallible signal allocation.
+const MAX_GRAPH_V2_INPUT_SIGNALS: usize = 1 << 24;
 
 fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
     if !status.is_null() {
@@ -241,12 +244,13 @@ fn init_inputs_from_inputs_mapping<T: FieldOps>(
 
     let mut inputs_len: usize = 1;
     for (offset, len) in inputs_info.values() {
-        let idx = offset + len;
+        let idx = checked_input_add(*offset, *len, "offset plus length")?;
         if idx > inputs_len {
             inputs_len = idx;
         }
     }
-    let mut inputs = vec![T::zero(); inputs_len];
+    let mut inputs = try_reserve_input_vec(inputs_len, "V1 inputs")?;
+    inputs.resize(inputs_len, T::zero());
     inputs[0] = T::one();
     let mut inputs_filled = 1;
     for (key, value) in input_list {
@@ -279,25 +283,164 @@ fn init_inputs_from_v2<T: FieldOps>(
     input_info: &[vm2::InputInfo],
     types: &[vm2::Type],
 ) -> Result<Vec<T>, Box<dyn std::error::Error>> {
-    let inputs_size = input_info.get_total_size(types)?;
-    let min_offset = input_info.min_offset().unwrap_or(0);
-    let signals_num = min_offset + inputs_size;
-    let mut component = Component::new(0, 0, vec![], inputs_size, signals_num);
+    let (inputs_size, min_offset) = checked_v2_input_layout(input_info, types)?;
+    checked_component_input_count(inputs_size)?;
+    let shifted_input_info = shift_input_offsets(input_info, min_offset)?;
+    let mut component = Component::new(0, 0, vec![], inputs_size, inputs_size);
     let inputs_cursor = Cursor::new(inputs_json.as_bytes());
-    init_signals(inputs_cursor, ff, types, input_info, &mut component)?;
-    let mut component_signals = Vec::with_capacity(signals_num);
+    init_signals(inputs_cursor, ff, types, &shifted_input_info, &mut component)?;
+    let mut component_signals = try_reserve_input_vec(inputs_size, "V2 component output")?;
     component.write_all_signals(&mut component_signals);
 
-    let mut inputs = Vec::with_capacity(inputs_size + 1);
+    let inputs_capacity = checked_input_add(inputs_size, 1, "inputs size plus one")?;
+    let mut inputs = try_reserve_input_vec(inputs_capacity, "V2 inputs")?;
     inputs.push(T::one());
     inputs.extend(
         component_signals.iter()
-            .skip(min_offset)
             .take(inputs_size)
             .map(|x| x.expect(
                 "[assertion] init_signals should not allow None input signals")));
 
     Ok(inputs)
+}
+
+fn checked_v2_input_layout(
+    input_info: &[vm2::InputInfo],
+    types: &[vm2::Type],
+) -> Result<(usize, usize), Box<dyn std::error::Error>> {
+    let mut inputs_size = 0usize;
+    let mut ranges = try_reserve_input_vec(input_info.len(), "V2 input ranges")?;
+    for info in input_info {
+        let base_type_size = match &info.type_id {
+            None => 1,
+            Some(type_id) => {
+                let ty = types.iter()
+                    .find(|ty| &ty.name == type_id)
+                    .ok_or_else(|| invalid_input_metadata("Unknown input type"))?;
+                checked_type_size(ty, types)?
+            }
+        };
+        let array_count = checked_product(&info.lengths, "input dimensions")?;
+        let input_size = checked_input_mul(array_count, base_type_size, "input size")?;
+        if input_size == 0 {
+            return Err(invalid_input_metadata("Input metadata size must be nonzero"));
+        }
+        inputs_size = checked_input_add(inputs_size, input_size, "total input size")?;
+        let end = checked_input_add(info.offset, input_size, "input offset plus size")?;
+        ranges.push((info.offset, end));
+    }
+
+    ranges.sort_by_key(|(offset, _)| *offset);
+    let min_offset = ranges.first().map(|(offset, _)| *offset).unwrap_or(0);
+    let mut expected_offset = min_offset;
+    for (offset, end) in ranges {
+        if offset != expected_offset {
+            return Err(invalid_input_metadata(
+                "Input metadata offsets must be contiguous and non-overlapping",
+            ));
+        }
+        expected_offset = end;
+    }
+    let signals_num = checked_input_add(min_offset, inputs_size, "signal count")?;
+    if expected_offset != signals_num {
+        return Err(invalid_input_metadata("Input metadata span is inconsistent"));
+    }
+    Ok((inputs_size, min_offset))
+}
+
+fn shift_input_offsets(
+    input_info: &[vm2::InputInfo],
+    min_offset: usize,
+) -> Result<Vec<vm2::InputInfo>, Box<dyn std::error::Error>> {
+    let mut shifted = try_reserve_input_vec(input_info.len(), "V2 shifted input info")?;
+    for info in input_info {
+        let mut shifted_info = info.clone();
+        shifted_info.offset = info.offset.checked_sub(min_offset).ok_or_else(|| {
+            invalid_input_metadata("Input metadata offset is below minimum offset")
+        })?;
+        shifted.push(shifted_info);
+    }
+    Ok(shifted)
+}
+
+fn checked_component_input_count(
+    signals_num: usize,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if signals_num > MAX_GRAPH_V2_INPUT_SIGNALS {
+        return Err(invalid_input_metadata(
+            "Input metadata V2 input count is too large",
+        ));
+    }
+    Ok(())
+}
+
+fn checked_type_size(
+    ty: &vm2::Type,
+    types: &[vm2::Type],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut total_size = 0usize;
+    for field in &ty.fields {
+        if let vm2::TypeFieldKind::Bus(bus_idx) = &field.kind {
+            if *bus_idx >= types.len() {
+                return Err(invalid_input_metadata("Bus type index is out of range"));
+            }
+        }
+
+        let dim_product = checked_product(&field.dims, "type field dimensions")?;
+        let field_size = if dim_product == 0 {
+            field.base_type_size
+        } else {
+            checked_input_mul(field.base_type_size, dim_product, "type field size")?
+        };
+        total_size = checked_input_add(total_size, field_size, "type size")?;
+    }
+    Ok(total_size)
+}
+
+fn checked_product(
+    values: &[usize],
+    context: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    values.iter().try_fold(1usize, |acc, value| {
+        checked_input_mul(acc, *value, context)
+    })
+}
+
+fn checked_input_add(
+    lhs: usize,
+    rhs: usize,
+    context: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    lhs.checked_add(rhs).ok_or_else(|| {
+        invalid_input_metadata(format!("Input metadata {} overflows usize", context))
+    })
+}
+
+fn checked_input_mul(
+    lhs: usize,
+    rhs: usize,
+    context: &str,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    lhs.checked_mul(rhs).ok_or_else(|| {
+        invalid_input_metadata(format!("Input metadata {} overflows usize", context))
+    })
+}
+
+fn try_reserve_input_vec<T>(
+    len: usize,
+    context: &str,
+) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+    let mut vec = Vec::new();
+    vec.try_reserve(len).map_err(|_| {
+        invalid_input_metadata(format!(
+            "Input metadata {} exceeds available memory",
+            context))
+    })?;
+    Ok(vec)
+}
+
+fn invalid_input_metadata(message: impl Into<String>) -> Box<dyn std::error::Error> {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, message.into()).into()
 }
 
 #[derive(Debug)]
@@ -662,5 +805,124 @@ mod tests {
         let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
         assert!(result.is_ok(), "calc_witness must not panic");
         assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_graph_v1_input_metadata_overflow_returns_error() {
+        let input_list: HashMap<String, Vec<U254>> = HashMap::new();
+        let mut inputs_info = super::InputSignalsInfo::new();
+        inputs_info.insert("a".to_string(), (usize::MAX, 1));
+
+        let err = super::init_inputs_from_inputs_mapping(&input_list, &inputs_info)
+            .unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_overflow_returns_error() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![usize::MAX, 2],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_invalid_bus_index() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("bus".to_string()),
+        }];
+        let types = vec![crate::vm2::Type {
+            name: "bus".to_string(),
+            fields: vec![crate::vm2::TypeField {
+                name: "x".to_string(),
+                kind: crate::vm2::TypeFieldKind::Bus(7),
+                offset: 0,
+                base_type_size: 1,
+                dims: vec![],
+            }],
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &types)
+            .unwrap_err();
+        assert!(err.to_string().contains("Bus type index is out of range"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_sparse_offsets() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![
+            crate::vm2::InputInfo {
+                name: "a".to_string(),
+                offset: 0,
+                lengths: vec![1],
+                type_id: None,
+            },
+            crate::vm2::InputInfo {
+                name: "b".to_string(),
+                offset: 4,
+                lengths: vec![1],
+                type_id: None,
+            },
+        ];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("contiguous"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_zero_sized_input() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![0],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_accepts_nonzero_contiguous_offsets() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 7,
+            lengths: vec![1],
+            type_id: None,
+        }];
+
+        let inputs = super::init_inputs_from_v2("{\"a\":[\"9\"]}", &ff, &input_info, &[])
+            .unwrap();
+        assert_eq!(inputs, vec![U254::from(1), U254::from(9)]);
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_oversized_component() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![super::MAX_GRAPH_V2_INPUT_SIGNALS + 1],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("input count is too large"));
     }
 }
