@@ -319,6 +319,90 @@ pub enum OpCode {
     OpI64Eqz = 73,
 }
 
+impl TryFrom<u8> for OpCode {
+    type Error = RuntimeError;
+
+    fn try_from(byte: u8) -> Result<Self, RuntimeError> {
+        Ok(match byte {
+            0 => OpCode::NoOp,
+            1 => OpCode::LoadSignal,
+            2 => OpCode::StoreSignal,
+            3 => OpCode::PushI64,
+            4 => OpCode::PushFf,
+            5 => OpCode::StoreVariableFf,
+            6 => OpCode::LoadVariableFf,
+            7 => OpCode::StoreVariableI64,
+            8 => OpCode::LoadVariableI64,
+            9 => OpCode::JumpIfFalseFf,
+            10 => OpCode::JumpIfFalseI64,
+            11 => OpCode::Jump,
+            12 => OpCode::Error,
+            13 => OpCode::LoadCmpSignal,
+            14 => OpCode::StoreCmpSignalAndRun,
+            15 => OpCode::StoreCmpSignalCntCheck,
+            16 => OpCode::StoreCmpInput,
+            17 => OpCode::OpMul,
+            18 => OpCode::OpAdd,
+            19 => OpCode::OpNeq,
+            20 => OpCode::OpDiv,
+            21 => OpCode::OpSub,
+            22 => OpCode::OpEq,
+            23 => OpCode::OpEqz,
+            24 => OpCode::OpI64Add,
+            25 => OpCode::OpI64Sub,
+            26 => OpCode::FfMReturn,
+            27 => OpCode::FfMCall,
+            28 => OpCode::FfStore,
+            29 => OpCode::FfLoad,
+            30 => OpCode::I64Load,
+            31 => OpCode::OpLt,
+            32 => OpCode::OpGt,
+            33 => OpCode::OpI64Mul,
+            34 => OpCode::OpI64Lte,
+            35 => OpCode::I64WrapFf,
+            36 => OpCode::OpShr,
+            37 => OpCode::OpBand,
+            38 => OpCode::OpRem,
+            39 => OpCode::OpAnd,
+            40 => OpCode::GetTemplateId,
+            41 => OpCode::GetTemplateSignalPosition,
+            42 => OpCode::GetTemplateSignalSize,
+            43 => OpCode::OpShl,
+            44 => OpCode::FfReturn,
+            45 => OpCode::OpBxor,
+            46 => OpCode::OpBor,
+            47 => OpCode::OpBnot,
+            48 => OpCode::OpGe,
+            49 => OpCode::StoreCmpInputCnt,
+            50 => OpCode::OpIdiv,
+            51 => OpCode::OpLe,
+            52 => OpCode::GetTemplateSignalDimension,
+            53 => OpCode::OpPow,
+            54 => OpCode::OpOr,
+            55 => OpCode::CopyCmpInputsFromSelf,
+            56 => OpCode::FfMStore,
+            57 => OpCode::CopySignalFromCmp,
+            58 => OpCode::CopySignalFromMemory,
+            59 => OpCode::CopyCmpInputsFromCmp,
+            60 => OpCode::CopySignal,
+            61 => OpCode::FfMStoreFromSignal,
+            62 => OpCode::CopyCmpInputsFromMemory,
+            63 => OpCode::GetTemplateSignalType,
+            64 => OpCode::GetBusFieldPosition,
+            65 => OpCode::GetBusFieldSize,
+            66 => OpCode::OpI64Eq,
+            67 => OpCode::FfMStoreFromCmpSignal,
+            68 => OpCode::GetBusFieldType,
+            69 => OpCode::GetBusFieldDimension,
+            70 => OpCode::OpI64Lt,
+            71 => OpCode::OpI64Gt,
+            72 => OpCode::OpI64Gte,
+            73 => OpCode::OpI64Eqz,
+            _ => return Err(RuntimeError::InvalidOpCode(byte)),
+        })
+    }
+}
+
 pub struct Signals<T: FieldOps> {
     present: BitVec,
     signals: Vec<T>,
@@ -524,8 +608,9 @@ pub struct Function {
     pub i64_variable_names: Vec<String>,
 }
 
-fn read_instruction(code: &[u8], ip: usize) -> OpCode {
-    unsafe { std::mem::transmute::<u8, OpCode>(code[ip]) }
+fn read_instruction(code: &[u8], ip: usize) -> Result<OpCode, RuntimeError> {
+    let byte = *code.get(ip).ok_or(RuntimeError::CodeIndexOutOfBounds)?;
+    OpCode::try_from(byte)
 }
 
 // read 4 bytes from the code and return usize and the next instruction pointer
@@ -558,6 +643,8 @@ pub enum RuntimeError {
     SignalIsAlreadySet,
     #[error("Code index is out of bounds")]
     CodeIndexOutOfBounds,
+    #[error("Invalid opcode byte: {0}")]
+    InvalidOpCode(u8),
     #[error("component is not initialized")]
     UninitializedComponent,
     #[error("Memory address is out of bounds")]
@@ -1078,7 +1165,13 @@ where
 
     let mut output = format!("{:08x} [{:10}] ", ip, name);
 
-    let op_code = read_instruction(code, ip);
+    let op_code = match read_instruction(code, ip) {
+        Ok(op_code) => op_code,
+        Err(e) => {
+            output.push_str(&e.to_string());
+            return (ip + 1, output);
+        }
+    };
     let mut ip = ip + 1usize;
 
     match op_code {
@@ -1637,7 +1730,7 @@ where
         disassemble_instruction::<T>(
             code, ip, name, ff_variable_names, i64_variable_names);
 
-        let op_code = read_instruction(code, ip);
+        let op_code = read_instruction(code, ip)?;
         ip += 1;
 
         match op_code {
@@ -3190,6 +3283,7 @@ impl TypeField {
 mod tests {
     // use bitvec::vec::BitVec;
     use bitvec::prelude::*;
+    use super::{OpCode, RuntimeError, read_instruction};
 
     #[test]
     fn test_ok() {
@@ -3203,5 +3297,29 @@ mod tests {
 
         println!("{:?}", x[4001]);
         println!("OK");
+    }
+
+    #[test]
+    fn opcode_try_from_rejects_out_of_range_bytes() {
+        // Every valid discriminant decodes; bytes past the last one are
+        // rejected instead of being interpreted as opcodes.
+        for byte in 0..=(OpCode::OpI64Eqz as u8) {
+            assert!(OpCode::try_from(byte).is_ok(), "byte {byte} should decode");
+        }
+        for byte in (OpCode::OpI64Eqz as u8 + 1)..=u8::MAX {
+            assert!(matches!(
+                OpCode::try_from(byte),
+                Err(RuntimeError::InvalidOpCode(b)) if b == byte));
+        }
+    }
+
+    #[test]
+    fn read_instruction_reports_out_of_bounds_ip() {
+        assert!(matches!(
+            read_instruction(&[], 0),
+            Err(RuntimeError::CodeIndexOutOfBounds)));
+        assert!(matches!(
+            read_instruction(&[OpCode::NoOp as u8], 1),
+            Err(RuntimeError::CodeIndexOutOfBounds)));
     }
 }
