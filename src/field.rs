@@ -4,6 +4,8 @@ use std::hash::{Hash, Hasher};
 use std::num::{TryFromIntError};
 use std::ops::{Add, Mul, Div, Rem, Sub, Shr, Shl, BitAnd, BitOr, BitXor, Not};
 use anyhow::anyhow;
+use ark_bn254::Fr;
+use ark_ff::{BigInt, PrimeField};
 use ruint::{aliases::U256, uint};
 use ruint::aliases::U128;
 use num_traits::{Zero, One};
@@ -267,6 +269,38 @@ pub type U254 = ruint::Uint<254, 4>;
 
 pub const bn254_prime: U254 = uint!(21888242871839275222246405745257275088548364400416034343698204186575808495617_U254);
 
+#[inline]
+fn mul_bn254_u254(a: U254, b: U254) -> U254 {
+    debug_assert_eq!(fr_modulus_u254(), bn254_prime);
+    if a < bn254_prime && b < bn254_prime && is_multi_limb_u254(a) && is_multi_limb_u254(b) {
+        fr_to_u254(u254_to_fr_canonical(a) * u254_to_fr_canonical(b))
+    } else {
+        <U254>::mul_mod(a, b, bn254_prime)
+    }
+}
+
+#[inline]
+fn is_multi_limb_u254(v: U254) -> bool {
+    let limbs = v.into_limbs();
+    limbs[1] != 0 || limbs[2] != 0 || limbs[3] != 0
+}
+
+#[inline]
+fn u254_to_fr_canonical(v: U254) -> Fr {
+    debug_assert!(v < bn254_prime);
+    Fr::from_bigint(BigInt(v.into_limbs())).unwrap()
+}
+
+#[inline]
+fn fr_to_u254(v: Fr) -> U254 {
+    U254::from_limbs(v.into_bigint().0)
+}
+
+#[inline]
+fn fr_modulus_u254() -> U254 {
+    U254::from_limbs(<Fr as PrimeField>::MODULUS.0)
+}
+
 impl FieldOps for U254 {
 
     const BITS: usize = 254;
@@ -292,7 +326,11 @@ impl FieldOps for U254 {
 
     #[inline]
     fn mul_mod(self, rhs: Self, m: Self) -> Self {
-        <U254>::mul_mod(self, rhs, m)
+        if m == bn254_prime {
+            mul_bn254_u254(self, rhs)
+        } else {
+            <U254>::mul_mod(self, rhs, m)
+        }
     }
 
     #[inline]
@@ -812,6 +850,7 @@ impl<T: FieldOps> FieldOperations for &Field<T> {
 #[cfg(test)]
 mod tests {
     use crate::field::{Field, U64, FieldOperations, U254, FieldOps, bn254_prime};
+    use crate::graph::Operation;
     use num_traits::One;
     use ruint::aliases::U256;
 
@@ -868,6 +907,126 @@ mod tests {
         let ff = &ff_bn256();
         let result = ff.shr(a, b);
         assert_eq!(want, result);
+    }
+
+    #[test]
+    fn test_bn254_fr_conversion_invariants() {
+        assert_eq!(super::fr_modulus_u254(), bn254_prime);
+        let conversion_values = [
+            U254::ZERO,
+            U254::from(1u64),
+            U254::from(u64::MAX),
+            U254::from(1u64) << 64,
+            (U254::from(1u64) << 64) + U254::from(1u64),
+            U254::from(1u64) << 128,
+            U254::from(1u64) << 192,
+            bn254_prime - U254::from(2u64),
+            bn254_prime - U254::from(1u64),
+        ];
+
+        for value in conversion_values {
+            assert_eq!(
+                super::fr_to_u254(super::u254_to_fr_canonical(value)),
+                value,
+                "Fr conversion roundtrip for {value}"
+            );
+        }
+
+        assert!(!super::is_multi_limb_u254(U254::ZERO));
+        assert!(!super::is_multi_limb_u254(U254::from(u64::MAX)));
+        assert!(super::is_multi_limb_u254(U254::from(1u64) << 64));
+        assert!(super::is_multi_limb_u254(bn254_prime - U254::from(1u64)));
+    }
+
+    #[test]
+    fn test_bn254_mul_fast_path_matches_ruint() {
+        let ff = &ff_bn256();
+        let half = bn254_prime >> 1;
+        let edge_values = [
+            U254::ZERO,
+            U254::from(1u64),
+            U254::from(2u64),
+            U254::from(u64::MAX),
+            U254::from(1u64) << 64,
+            (U254::from(1u64) << 64) + U254::from(1u64),
+            U254::from(1u64) << 128,
+            U254::from(1u64) << 192,
+            half - U254::from(1u64),
+            half,
+            half + U254::from(1u64),
+            bn254_prime - U254::from(2u64),
+            bn254_prime - U254::from(1u64),
+            bn254_prime,
+            bn254_prime + U254::from(1u64),
+            U254::from(1u64) << 253,
+            U254::MAX,
+        ];
+
+        for a in edge_values {
+            for b in edge_values {
+                assert_bn254_mul_matches_ruint(ff, a, b);
+            }
+        }
+
+        let cases = [
+            (U254::ZERO, U254::ZERO),
+            (U254::from(2u64), U254::from(3u64)),
+            (bn254_prime - U254::from(1u64), bn254_prime - U254::from(1u64)),
+            (bn254_prime, bn254_prime + U254::from(1u64)),
+            (U254::MAX, bn254_prime - U254::from(1u64)),
+            (
+                u254("18583076334226168172367231819260574371431472897769128993835383390508861945746"),
+                u254("2805997381032117399116049231308848744608941055401984107726204241709819608479"),
+            ),
+        ];
+
+        for (a, b) in cases {
+            assert_bn254_mul_matches_ruint(ff, a, b);
+        }
+
+        let mut state = 0x9e3779b97f4a7c15u64;
+        for _ in 0..256 {
+            let a = next_test_u254(&mut state) % bn254_prime;
+            let b = next_test_u254(&mut state) % bn254_prime;
+            assert_bn254_mul_matches_ruint(ff, a, b);
+        }
+
+        for _ in 0..256 {
+            let a = next_test_u254(&mut state);
+            let b = next_test_u254(&mut state);
+            assert_bn254_mul_matches_ruint(ff, a, b);
+        }
+    }
+
+    fn assert_bn254_mul_matches_ruint(ff: &Field<U254>, a: U254, b: U254) {
+        let expected = <U254>::mul_mod(a, b, bn254_prime);
+        assert_eq!(
+            <U254 as FieldOps>::mul_mod(a, b, bn254_prime),
+            expected,
+            "FieldOps::mul_mod({a}, {b})"
+        );
+        assert_eq!(ff.mul(a, b), expected, "FieldOperations::mul({a}, {b})");
+        assert_eq!(
+            ff.op_duo(Operation::Mul, a, b),
+            expected,
+            "FieldOperations::op_duo(Mul, {a}, {b})"
+        );
+    }
+
+    fn next_test_u254(state: &mut u64) -> U254 {
+        U254::from_limbs([
+            next_test_u64(state),
+            next_test_u64(state),
+            next_test_u64(state),
+            next_test_u64(state) & ((1u64 << 62) - 1),
+        ])
+    }
+
+    fn next_test_u64(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *state
     }
 
     fn u254(s: &str) -> U254 {
