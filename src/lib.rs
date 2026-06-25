@@ -245,29 +245,88 @@ fn init_inputs_from_inputs_mapping<T: FieldOps>(
     }
     let mut inputs = vec![T::zero(); inputs_len];
     inputs[0] = T::one();
+    let mut inputs_set = vec![false; inputs_len];
+    inputs_set[0] = true;
     let mut inputs_filled = 1;
     for (key, value) in input_list {
         match inputs_info.get(key) {
             None => {
-                return Err(anyhow!("Invalid input signal name for the circuit: {}", key).into());
+                return Err(anyhow!(
+                    "invalid input signal {}; expected one of: {}",
+                    key,
+                    format_input_mapping_names(inputs_info)).into());
             }
             Some(&(offset, len)) => {
                 if len != value.len() {
-                    return Err(anyhow!("Invalid input signal {} length: {}", key, len).into());
+                    return Err(anyhow!(
+                        "invalid input signal {} length: got {}, expected {}",
+                        key,
+                        value.len(),
+                        len).into());
                 }
                 for (i, v) in value.iter().enumerate() {
                     inputs[offset + i] = *v;
+                    inputs_set[offset + i] = true;
                     inputs_filled += 1;
                 }
             }
         }
     };
 
+    // inputs_filled counts the slots written above; comparing it to inputs_len
+    // catches the overlapping/gapped-offset case that the per-name missing check
+    // below cannot see (every named input set, yet the totals still disagree).
     if inputs_filled != inputs_len {
-        return Err(anyhow!("Invalid input signal count: {}, expected {}", inputs_filled, inputs_len).into());
+        // Common case: name the inputs whose slots are still unset.
+        let missing = missing_input_mapping_names(inputs_info, &inputs_set);
+        if !missing.is_empty() {
+            return Err(anyhow!(
+                "{}",
+                format_missing_input_mapping_message(&missing)).into());
+        }
+        // Fallback reached only on malformed metadata (gapped/overlapping
+        // offsets) where no single input name can be pointed to.
+        return Err(anyhow!(
+            "invalid input signal count: got {}, expected {}",
+            inputs_filled,
+            inputs_len).into());
     }
 
     Ok(inputs)
+}
+
+fn format_input_mapping_names(inputs_info: &InputSignalsInfo) -> String {
+    let mut names: Vec<&str> = inputs_info.keys().map(String::as_str).collect();
+    names.sort_unstable();
+    if names.is_empty() {
+        "(none)".to_string()
+    } else {
+        names.join(", ")
+    }
+}
+
+fn missing_input_mapping_names(
+    inputs_info: &InputSignalsInfo,
+    inputs_set: &[bool],
+) -> Vec<String> {
+    let mut names: Vec<String> = inputs_info
+        .iter()
+        .filter_map(|(name, &(offset, len))| {
+            let is_missing = (offset..offset + len)
+                .any(|idx| !inputs_set.get(idx).copied().unwrap_or(false));
+            is_missing.then(|| name.clone())
+        })
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+fn format_missing_input_mapping_message(names: &[String]) -> String {
+    if names.len() == 1 {
+        format!("missing input signal {}", names[0])
+    } else {
+        format!("missing input signals {}", names.join(", "))
+    }
 }
 
 fn init_inputs_from_v2<T: FieldOps>(
@@ -368,15 +427,23 @@ fn flatten_array<T: FieldOps>(
 
     match v {
         serde_json::Value::String(s) => {
-            let i = ff.parse_str(s)?;
+            let i = ff.parse_str(s)
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    anyhow!("invalid field value at {}: {}", key, e).into()
+                })?;
             vals.push(i);
         }
         serde_json::Value::Number(n) => {
             if !n.is_u64() {
-                return Err(anyhow!("signal value is not a positive integer: {}", key).into());
+                return Err(anyhow!(
+                    "invalid field value at {}: expected positive integer, got number",
+                    key).into());
             }
             let n = n.as_u64().unwrap().to_string();
-            let i = ff.parse_str(&n)?;
+            let i = ff.parse_str(&n)
+                .map_err(|e| -> Box<dyn std::error::Error> {
+                    anyhow!("invalid field value at {}: {}", key, e).into()
+                })?;
             vals.push(i);
         }
         serde_json::Value::Array(arr) => {
@@ -387,12 +454,24 @@ fn flatten_array<T: FieldOps>(
         }
         _ => {
             return Err(anyhow!(
-                "value for key {} must be an a number as a string, as a number of an array of strings or numbers",
-                key).into());
+                "invalid field value at {}: expected string, number, or array, got {}",
+                key,
+                json_value_kind(v)).into());
         }
     };
 
     Ok(())
+}
+
+fn json_value_kind(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
@@ -435,7 +514,9 @@ pub fn deserialize_and_flatten_inputs<T: FieldOps>(
     let map = if let serde_json::Value::Object(map) = v {
         map
     } else {
-        return Err(anyhow!("inputs must be an object").into());
+        return Err(anyhow!(
+            "inputs must be an object, got {}",
+            json_value_kind(&v)).into());
     };
 
     let mut inputs: HashMap<String, Vec<T>> = HashMap::new();
@@ -450,8 +531,9 @@ pub fn deserialize_and_flatten_inputs<T: FieldOps>(
             }
             _ => {
                 return Err(anyhow!(
-                    "value for key {} must be an a number as a string, as a number of an array of strings or numbers",
-                    k.clone()).into());
+                    "invalid input value at {}: expected string, number, or array, got {}",
+                    k.clone(),
+                    json_value_kind(&v)).into());
             }
         };
         inputs.insert(k.clone(), vals);
@@ -618,7 +700,8 @@ mod tests {
         let data = r#"{"v":{"a":1,"b":{"c":2},"d":[3,4]}}"#;
         let ff = Field::new(bn254_prime);
         let err = super::deserialize_and_flatten_inputs::<U254>(data.as_bytes(), &ff).unwrap_err();
-        assert!(err.to_string().contains("value for key v must be an a number as a string, as a number of an array of strings or numbers"));
+        assert!(err.to_string().contains("invalid input value at v"));
+        assert!(err.to_string().contains("got object"));
 
         let data = r#"{"v":"1", "b": [[1, "2"], [3]]}"#;
         let res = super::deserialize_and_flatten_inputs::<U254>(data.as_bytes(), &ff).unwrap();
@@ -629,5 +712,59 @@ mod tests {
             U254::from(2),
             U254::from(3)]);
         assert_eq!(res, want);
+    }
+
+    #[test]
+    fn test_init_inputs_from_inputs_mapping_errors() {
+        let mut inputs_info = HashMap::new();
+        inputs_info.insert("a".to_string(), (1, 2));
+        inputs_info.insert("b".to_string(), (3, 1));
+
+        let mut unknown_input = HashMap::new();
+        unknown_input.insert("z".to_string(), vec![U254::from(1)]);
+        let err = super::init_inputs_from_inputs_mapping(&unknown_input, &inputs_info)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid input signal z"));
+        assert!(err.contains("expected one of: a, b"));
+
+        let mut wrong_len = HashMap::new();
+        wrong_len.insert("a".to_string(), vec![U254::from(1)]);
+        let err = super::init_inputs_from_inputs_mapping(&wrong_len, &inputs_info)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid input signal a length: got 1, expected 2"));
+
+        let mut missing = HashMap::new();
+        missing.insert("a".to_string(), vec![U254::from(1), U254::from(2)]);
+        let err = super::init_inputs_from_inputs_mapping(&missing, &inputs_info)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing input signal b"));
+    }
+
+    #[test]
+    fn test_deserialize_and_flatten_inputs_error_paths() {
+        let ff = Field::new(bn254_prime);
+
+        let data = r#""1""#;
+        let err = super::deserialize_and_flatten_inputs::<U254>(data.as_bytes(), &ff)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("inputs must be an object"));
+        assert!(err.contains("got string"));
+
+        let data = r#"{"input":["1", "2", "not-a-field"]}"#;
+        let err = super::deserialize_and_flatten_inputs::<U254>(data.as_bytes(), &ff)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid field value at input[2]"));
+
+        let data = r#"{"input":[true]}"#;
+        let err = super::deserialize_and_flatten_inputs::<U254>(data.as_bytes(), &ff)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid field value at input[0]"));
+        assert!(err.contains("got boolean"));
     }
 }
