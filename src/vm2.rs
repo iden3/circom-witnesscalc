@@ -16,31 +16,39 @@ pub struct InputInfo {
     pub type_id: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("unknown type error")]
-pub struct UnknownTypeName();
-
 pub trait InputInfoSliceExt {
-    fn get_total_size(&self, types: &[Type]) -> Result<usize, UnknownTypeName>;
+    fn get_total_size(&self, types: &[Type]) -> Result<usize, RuntimeError>;
     fn min_offset(&self) -> Option<usize>;
 }
 
+fn checked_product(values: &[usize]) -> Result<usize, RuntimeError> {
+    values.iter().try_fold(1usize, |acc, value| {
+        acc.checked_mul(*value)
+            .ok_or(RuntimeError::OperationOverflows)
+    })
+}
+
 impl InputInfoSliceExt for [InputInfo] {
-    fn get_total_size(&self, types: &[Type]) -> Result<usize, UnknownTypeName> {
+    fn get_total_size(&self, types: &[Type]) -> Result<usize, RuntimeError> {
         let mut total_size = 0usize;
         for i in self {
             let base_type_size: usize = match &i.type_id {
                 None => 1,
                 Some(type_id) => {
                     match types.iter().find(|x| &x.name == type_id) {
-                        None => { return Err(UnknownTypeName()); }
-                        Some(t) => t.get_total_size()
+                        None => { return Err(RuntimeError::UnknownTypeName(type_id.clone())); }
+                        Some(t) => t.get_total_size()?
                     }
                 }
             };
 
-            total_size += i.lengths.iter().product::<usize>()
-                * base_type_size;
+            let length_product = checked_product(&i.lengths)?;
+            let input_size = length_product
+                .checked_mul(base_type_size)
+                .ok_or(RuntimeError::OperationOverflows)?;
+            total_size = total_size
+                .checked_add(input_size)
+                .ok_or(RuntimeError::OperationOverflows)?;
         }
         Ok(total_size)
     }
@@ -544,34 +552,45 @@ pub enum Signal {
     Bus(usize, Vec<usize>),  // bus type index and dimensions
 }
 
-fn calculate_signal_size(signal: &Signal, types: &[Type]) -> usize {
+fn calculate_signal_size(signal: &Signal, types: &[Type]) -> Result<usize, RuntimeError> {
     match signal {
         Signal::Ff(dims) => {
-            if dims.is_empty() { 1 } else { dims.iter().product() }
+            if dims.is_empty() { Ok(1) } else { checked_product(dims) }
         }
         Signal::Bus(type_idx, dims) => {
-            let bus_type = &types[*type_idx];
-            let bus_size = bus_type.get_total_size();
-            if dims.is_empty() { bus_size } else { bus_size * dims.iter().product::<usize>() }
+            let bus_type = types.get(*type_idx)
+                .ok_or(RuntimeError::InvalidTypeId(*type_idx))?;
+            let bus_size = bus_type.get_total_size()?;
+            if dims.is_empty() {
+                Ok(bus_size)
+            } else {
+                let dim_product = checked_product(dims)?;
+                bus_size.checked_mul(dim_product)
+                    .ok_or(RuntimeError::OperationOverflows)
+            }
         }
     }
 }
 
-fn calculate_signal_base_size(signal: &Signal, types: &[Type]) -> usize {
+fn calculate_signal_base_size(signal: &Signal, types: &[Type]) -> Result<usize, RuntimeError> {
     match signal {
-        Signal::Ff(..) => 1,
+        Signal::Ff(..) => Ok(1),
         Signal::Bus(type_idx, ..) => {
-            let bus_type = &types[*type_idx];
-            let base_size: usize = bus_type.get_total_size();
-            base_size
+            let bus_type = types.get(*type_idx)
+                .ok_or(RuntimeError::InvalidTypeId(*type_idx))?;
+            bus_type.get_total_size()
         }
     }
 }
 
-fn calculate_signal_offset(signals: &[Signal], signal_id: usize, types: &[Type]) -> usize {
-    signals.iter().take(signal_id)
-        .map(|sig| calculate_signal_size(sig, types))
-        .sum()
+fn calculate_signal_offset(
+    signals: &[Signal], signal_id: usize, types: &[Type]) -> Result<usize, RuntimeError> {
+
+    signals.iter().take(signal_id).try_fold(0usize, |acc, sig| {
+        let size = calculate_signal_size(sig, types)?;
+        acc.checked_add(size)
+            .ok_or(RuntimeError::OperationOverflows)
+    })
 }
 
 impl Signal {
@@ -663,7 +682,7 @@ pub enum RuntimeError {
     UnknownArgumentType(u8),
     #[error("Invalid template ID: {0}")]
     InvalidTemplateId(usize),
-    #[error("Component graph is cyclic or nested beyond the template count")]
+    #[error("Component graph is cyclic")]
     CyclicComponentGraph,
     #[error("Signal ID {0} is out of bounds (max {1})")]
     SignalIdOutOfBounds(usize, usize),
@@ -671,6 +690,8 @@ pub enum RuntimeError {
     DimensionIndexOutOfBounds(usize, usize),
     #[error("Invalid type ID: {0}")]
     InvalidTypeId(usize),
+    #[error("Unknown type name: {0}")]
+    UnknownTypeName(String),
     #[error("Bus type table contains a cycle")]
     CyclicBusType,
     #[error("Invalid field ID: {1}, type ID: {0}")]
@@ -2547,15 +2568,22 @@ where
                 }
                 
                 let position = if signal_id < num_outputs {
-                    calculate_signal_offset(&template.outputs, signal_id, &circuit.types)
+                    calculate_signal_offset(&template.outputs, signal_id, &circuit.types)?
                 } else {
-                    let output_total_size: usize = template.outputs.iter()
-                        .map(|sig| calculate_signal_size(sig, &circuit.types))
-                        .sum();
-                    output_total_size + calculate_signal_offset(&template.inputs, signal_id - num_outputs, &circuit.types)
+                    let output_total_size = template.outputs.iter()
+                        .try_fold(0usize, |acc, sig| {
+                            let size = calculate_signal_size(sig, &circuit.types)?;
+                            acc.checked_add(size)
+                                .ok_or(RuntimeError::OperationOverflows)
+                        })?;
+                    let input_offset = calculate_signal_offset(
+                        &template.inputs, signal_id - num_outputs, &circuit.types)?;
+                    output_total_size
+                        .checked_add(input_offset)
+                        .ok_or(RuntimeError::OperationOverflows)?
                 };
                 
-                vm.push_i64(position as i64);
+                vm.push_usize(position)?;
             }
             OpCode::GetTemplateSignalSize => {
                 let template_id = vm.pop_usize()?;
@@ -2575,12 +2603,12 @@ where
                 }
                 
                 let size = if signal_id < num_outputs {
-                    calculate_signal_base_size(&template.outputs[signal_id], &circuit.types)
+                    calculate_signal_base_size(&template.outputs[signal_id], &circuit.types)?
                 } else {
-                    calculate_signal_base_size(&template.inputs[signal_id - num_outputs], &circuit.types)
+                    calculate_signal_base_size(&template.inputs[signal_id - num_outputs], &circuit.types)?
                 };
                 
-                vm.push_i64(size as i64);
+                vm.push_usize(size)?;
             }
             OpCode::GetTemplateSignalType => {
                 let template_id = vm.pop_usize()?;
@@ -3217,8 +3245,12 @@ pub struct Type {
 }
 
 impl Type {
-    pub fn get_total_size(&self) -> usize {
-        self.fields.iter().map(|f| f.get_total_size()).sum()
+    pub fn get_total_size(&self) -> Result<usize, RuntimeError> {
+        self.fields.iter().try_fold(0usize, |acc, field| {
+            let field_size = field.get_total_size()?;
+            acc.checked_add(field_size)
+                .ok_or(RuntimeError::OperationOverflows)
+        })
     }
 }
 
@@ -3233,12 +3265,14 @@ pub struct TypeField {
 }
 
 impl TypeField {
-    pub fn get_total_size(&self) -> usize {
-        let dim_product: usize = self.dims.iter().product();
+    pub fn get_total_size(&self) -> Result<usize, RuntimeError> {
+        let dim_product = checked_product(&self.dims)?;
         if dim_product == 0 {
-            self.base_type_size
+            Ok(self.base_type_size)
         } else {
-            self.base_type_size * dim_product
+            self.base_type_size
+                .checked_mul(dim_product)
+                .ok_or(RuntimeError::OperationOverflows)
         }
     }
 }

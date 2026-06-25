@@ -27,7 +27,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::field::{bn254_prime, Field, FieldOperations, FieldOps, U254, U64};
 use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
 use crate::storage::{deserialize_witnesscalc_vm2_body, read_witnesscalc_vm2_header, WITNESSCALC_CVM_MAGIC, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
-use crate::vm2::{execute, Circuit, Component};
+use crate::vm2::{execute, Circuit, Component, RuntimeError};
 use crate::vm2::InputInfoSliceExt;
 use crate::vm2_setup::{build_component_tree, init_signals, validate_types};
 
@@ -278,14 +278,17 @@ fn init_inputs_from_v2<T: FieldOps>(
 ) -> Result<Vec<T>, Box<dyn std::error::Error>> {
     let inputs_size = input_info.get_total_size(types)?;
     let min_offset = input_info.min_offset().unwrap_or(0);
-    let signals_num = min_offset + inputs_size;
+    let signals_num = min_offset.checked_add(inputs_size)
+        .ok_or(RuntimeError::OperationOverflows)?;
     let mut component = Component::new(0, 0, vec![], inputs_size, signals_num);
     let inputs_cursor = Cursor::new(inputs_json.as_bytes());
     init_signals(inputs_cursor, ff, types, input_info, &mut component)?;
     let mut component_signals = Vec::with_capacity(signals_num);
     component.write_all_signals(&mut component_signals);
 
-    let mut inputs = Vec::with_capacity(inputs_size + 1);
+    let capacity = inputs_size.checked_add(1)
+        .ok_or(RuntimeError::OperationOverflows)?;
+    let mut inputs = Vec::with_capacity(capacity);
     inputs.push(T::one());
     inputs.extend(
         component_signals.iter()
