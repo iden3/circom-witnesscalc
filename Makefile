@@ -29,14 +29,12 @@ endif
 lib-android-aarch64: check-android-ndk
 	export CC=$(ANDROID_TOOLCHAIN)/aarch64-linux-android34-clang; \
 	export CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$$CC; \
-	export CLANG_PATH=$$CC; \
 	export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=0x4000"; \
 	cargo build --target aarch64-linux-android --release
 
 lib-android-x86_64: check-android-ndk
 	export CC=$(ANDROID_TOOLCHAIN)/x86_64-linux-android34-clang; \
 	export CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER=$$CC; \
-	export CLANG_PATH=$$CC; \
 	export RUSTFLAGS="-C link-arg=-Wl,-z,max-page-size=0x4000"; \
 	cargo build --target x86_64-linux-android --release
 
