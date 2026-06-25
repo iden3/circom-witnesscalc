@@ -19,7 +19,7 @@ use std::slice::from_raw_parts;
 use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::{evaluate, Nodes, NodesInterface, NodesStorage, VecNodes};
+use crate::graph::{evaluate, validate_node_indices, Nodes, NodesInterface, NodesStorage, VecNodes};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
@@ -225,6 +225,9 @@ fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
             init_inputs_from_v2(inputs, &nodes.ff, input_info, types)?
         }
     };
+
+    validate_node_indices(
+        &nodes.nodes, inputs.len(), nodes.constants.len(), signals)?;
 
     let result = evaluate(
         &nodes.ff, &nodes.nodes, &inputs, signals, &nodes.constants);
@@ -639,6 +642,25 @@ mod tests {
         let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
 
         assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_out_of_range_node_index() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        // A graph that decodes cleanly but whose second node references a
+        // non-existent operand must produce an error, not a panic.
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        nodes.push_noopt(Node::Input(0));
+        nodes.push_noopt(Node::Op(Operation::Mul, 0, 5));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[1], &[], &[]).unwrap();
+
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+        assert!(result.is_ok(), "calc_witness must not panic");
         assert!(result.unwrap().is_err());
     }
 }
