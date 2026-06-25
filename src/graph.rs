@@ -1465,7 +1465,10 @@ mod tests {
     use std::ops::{Div};
     use super::*;
     use ruint::{uint};
-    use crate::field::U254;
+    use crate::field::{bn254_prime, U254};
+    use crate::{calc_witness, wtns_from_u256_witness};
+    use crate::storage::serialize_witnesscalc_graph;
+    use crate::vm2;
 
     #[test]
     fn test_bn254_graph_fr_conversion_invariants() {
@@ -1602,6 +1605,108 @@ mod tests {
             .wrapping_mul(6364136223846793005)
             .wrapping_add(1442695040888963407);
         *state
+    }
+
+    #[test]
+    fn test_mixed_operations_keep_legacy_mul_semantics() {
+        let canonical = U256::from(17u64);
+        let other = U256::from(23u64);
+        let noncanonical = M + U256::from(5u64);
+        let wide = uint!(69475253542389717254142591005212744711961990799384338423674550404747877783961_U256);
+
+        let bitwise = Operation::Bor.eval(canonical, wide);
+        assert_eq!(
+            Operation::Mul.eval(bitwise, other),
+            bitwise.mul_mod(other, M),
+            "bitwise output feeds multiplication"
+        );
+
+        let shifted = Operation::Shl.eval(U256::from(1u64), U256::from(253u64));
+        assert_eq!(
+            Operation::Mul.eval(shifted, other),
+            shifted.mul_mod(other, M),
+            "shift output feeds multiplication"
+        );
+
+        let modulo = Operation::Mod.eval(noncanonical, U256::from(19u64));
+        assert_eq!(
+            Operation::Mul.eval(modulo, other),
+            modulo.mul_mod(other, M),
+            "mod output feeds multiplication"
+        );
+
+        let idiv = Operation::Idiv.eval(noncanonical, U256::from(3u64));
+        assert_eq!(
+            Operation::Mul.eval(idiv, other),
+            idiv.mul_mod(other, M),
+            "idiv output feeds multiplication"
+        );
+
+        let mul = Operation::Mul.eval(M - U256::from(1u64), M - U256::from(1u64));
+        assert_eq!(mul, U256::from(1u64));
+        assert_eq!(Operation::Eq.eval(mul, U256::from(1u64)), U256::from(1u64));
+        assert_eq!(Operation::Lt.eval(mul, other), U256::from(1u64));
+
+        assert_eq!(Operation::Eq.eval(noncanonical, U256::from(5u64)), U256::ZERO);
+        assert_eq!(Operation::Neq.eval(noncanonical, U256::from(5u64)), U256::from(1u64));
+        assert_eq!(Operation::Gt.eval(noncanonical, other), u_gt(&noncanonical, &other));
+        assert_eq!(Operation::Band.eval(noncanonical, wide), noncanonical.bitand(wide));
+    }
+
+    #[test]
+    fn test_mixed_mul_graph_witness_bytes_match_legacy_values() {
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let a = nodes.push_noopt(Node::Input(1)).0;
+        let b = nodes.push_noopt(Node::Input(2)).0;
+        let prime = nodes.const_node_idx_from_value(bn254_prime);
+        let three = nodes.const_node_idx_from_value(U254::from(3u64));
+
+        let bitwise = nodes.push_noopt(Node::Op(Operation::Band, prime, prime)).0;
+        let bitwise_mul = nodes.push_noopt(Node::Op(Operation::Mul, bitwise, three)).0;
+        let bitwise_square = nodes.push_noopt(Node::Op(Operation::Mul, bitwise, bitwise)).0;
+        let shift = nodes.push_noopt(Node::Op(Operation::Shl, a, three)).0;
+        let shift_mul = nodes.push_noopt(Node::Op(Operation::Mul, shift, b)).0;
+        let mul = nodes.push_noopt(Node::Op(Operation::Mul, a, b)).0;
+        let cmp = nodes.push_noopt(Node::Op(Operation::Gt, mul, b)).0;
+        let eq = nodes.push_noopt(Node::Op(Operation::Eq, bitwise, a)).0;
+        let witness_signals = vec![bitwise_mul, bitwise_square, shift_mul, cmp, eq];
+
+        let input_infos = vec![vm2::InputInfo {
+            name: "in".to_string(),
+            offset: 1,
+            lengths: vec![2],
+            type_id: None,
+        }];
+        let types = vec![];
+        let mut graph_data = Vec::new();
+        serialize_witnesscalc_graph(
+            &mut graph_data,
+            &nodes,
+            &witness_signals,
+            &input_infos,
+            &types)
+            .unwrap();
+
+        let actual = calc_witness(r#"{"in":["5","7"]}"#, &graph_data).unwrap();
+
+        let a = U256::from(5u64);
+        let b = U256::from(7u64);
+        let three = U256::from(3u64);
+        let bitwise = u254_to_u256(bn254_prime);
+        let bitwise_mul = bitwise.mul_mod(three, M);
+        let bitwise_square = bitwise.mul_mod(bitwise, M);
+        let shift = Operation::Shl.eval(a, three);
+        let shift_mul = shift.mul_mod(b, M);
+        let mul = a.mul_mod(b, M);
+        let cmp = Operation::Gt.eval(mul, b);
+        let eq = Operation::Eq.eval(bitwise, a);
+        let expected = wtns_from_u256_witness(vec![bitwise_mul, bitwise_square, shift_mul, cmp, eq]);
+
+        assert_eq!(actual, expected);
+    }
+
+    fn u254_to_u256(value: U254) -> U256 {
+        U256::from_limbs(value.into_limbs())
     }
 
     #[test]
