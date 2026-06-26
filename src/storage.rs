@@ -10,7 +10,7 @@ use crate::field::{FieldOps, Field};
 use crate::graph::{Nodes, NodesStorage, Operation, TresOperation, UnoOperation};
 use crate::proto::SignalDescription;
 use crate::proto::vm::{IoDef, IoDefs};
-use crate::vm::{Function, Template};
+use crate::vm::{Function, Template, validate_compiled_bytecode};
 use crate::vm2;
 
 fn write_signal<W: Write>(w: &mut W, signal: &vm2::Signal) -> std::io::Result<()> {
@@ -422,15 +422,21 @@ pub fn deserialize_witnesscalc_vm(
     let md: crate::proto::vm::VmMd = read_message(&mut br)?;
 
     let mut templates: Vec<Template> = Vec::with_capacity(md.templates_num as usize);
-    for _ in 0..md.templates_num {
+    for template_idx in 0..md.templates_num {
         let tmpl: crate::proto::vm::Template = read_message(&mut br)?;
-        templates.push(Template::try_from(&tmpl).unwrap());
+        templates.push(Template::try_from(&tmpl)
+            .map_err(|err| Error::new(
+                ErrorKind::InvalidData,
+                format!("template {} is invalid: {}", template_idx, err)))?);
     }
 
     let mut functions: Vec<Function> = Vec::with_capacity(md.functions_num as usize);
-    for _ in 0..md.functions_num {
+    for function_idx in 0..md.functions_num {
         let func: crate::proto::vm::Function = read_message(&mut br)?;
-        functions.push(Function::try_from(&func).unwrap());
+        functions.push(Function::try_from(&func)
+            .map_err(|err| Error::new(
+                ErrorKind::InvalidData,
+                format!("function {} is invalid: {}", function_idx, err)))?);
     }
 
     let mut constants = Vec::with_capacity(md.constants_num as usize);
@@ -441,47 +447,147 @@ pub fn deserialize_witnesscalc_vm(
         constants.push(c);
     }
 
-    Ok(CompiledCircuit {
-        main_template_id: md.main_template_id.try_into()
-            .expect("main template id too large for this architecture"),
-        templates,
-        functions,
-        signals_num: md.signals_num.try_into()
-            .expect("signals number too large for this architecture"),
-        constants,
-        inputs: md.inputs.iter()
-            .map(|(sig_name, sig_desc)| (
+    let main_template_id = md.main_template_id.try_into()
+        .map_err(|err| Error::new(
+            ErrorKind::InvalidData,
+            format!("main template id is invalid: {}", err)))?;
+    let signals_num = md.signals_num.try_into()
+        .map_err(|err| Error::new(
+            ErrorKind::InvalidData,
+            format!("signals number is invalid: {}", err)))?;
+    let inputs: InputList = md.inputs.iter()
+        .map(|(sig_name, sig_desc)| {
+            Ok((
                 sig_name.clone(),
                 TryInto::<usize>::try_into(sig_desc.offset)
-                    .expect("signal offset is too large for this architecture"),
+                    .map_err(|err| Error::new(
+                        ErrorKind::InvalidData,
+                        format!("input signal offset is invalid: {}", err)))?,
                 TryInto::<usize>::try_into(sig_desc.len)
-                    .expect("signals length is too large for this architecture"),
+                    .map_err(|err| Error::new(
+                        ErrorKind::InvalidData,
+                        format!("input signal length is invalid: {}", err)))?,
             ))
-            .collect(),
-        witness_signals: md.witness_signals.iter()
-            .map(|x| TryInto::<usize>::try_into(*x)
-                .expect("witness signal index is too large for this architecture"))
-            .collect(),
-        io_map: md.io_map
-            .iter()
-            .map(|(tmpl_id, io_defs)| (
+        })
+        .collect::<std::io::Result<_>>()?;
+    let witness_signals: Vec<usize> = md.witness_signals.iter()
+        .map(|x| TryInto::<usize>::try_into(*x)
+            .map_err(|err| Error::new(
+                ErrorKind::InvalidData,
+                format!("witness signal index is invalid: {}", err))))
+        .collect::<std::io::Result<_>>()?;
+    let io_map: TemplateInstanceIOMap = md.io_map
+        .iter()
+        .map(|(tmpl_id, io_defs)| {
+            Ok((
                 TryInto::<usize>::try_into(*tmpl_id)
-                    .expect("template index is too large for this architecture"),
+                    .map_err(|err| Error::new(
+                        ErrorKind::InvalidData,
+                        format!("template index is invalid: {}", err)))?,
                 io_defs.io_defs.iter()
-                    .map(|d| IODef {
-                        code: d.code.try_into()
-                            .expect("signal code is too large for this architecture"),
-                        offset: d.offset.try_into()
-                            .expect("signal offset is too large for this architecture"),
-                        lengths: d.lengths.iter()
-                            .map(|l| TryInto::<usize>::try_into(*l)
-                                .expect("signal length is too large for this architecture"))
-                            .collect(),
+                    .map(|d| {
+                        Ok(IODef {
+                            code: d.code.try_into()
+                                .map_err(|err| Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("signal code is invalid: {}", err)))?,
+                            offset: d.offset.try_into()
+                                .map_err(|err| Error::new(
+                                    ErrorKind::InvalidData,
+                                    format!("signal offset is invalid: {}", err)))?,
+                            lengths: d.lengths.iter()
+                                .map(|l| TryInto::<usize>::try_into(*l)
+                                    .map_err(|err| Error::new(
+                                        ErrorKind::InvalidData,
+                                        format!("signal length is invalid: {}", err))))
+                                .collect::<std::io::Result<_>>()?,
+                        })
                     })
-                    .collect(),
+                    .collect::<std::io::Result<_>>()?,
             ))
-            .collect(),
+        })
+        .collect::<std::io::Result<_>>()?;
+
+    validate_legacy_signal_ranges(
+        signals_num, &inputs, &witness_signals, &io_map, templates.len())?;
+    validate_compiled_bytecode(
+        &templates, &functions, &io_map, constants.len(), main_template_id)
+        .map_err(|err| Error::new(ErrorKind::InvalidData, err))?;
+
+    Ok(CompiledCircuit {
+        main_template_id,
+        templates,
+        functions,
+        signals_num,
+        constants,
+        inputs,
+        witness_signals,
+        io_map,
     })
+}
+
+fn validate_legacy_signal_ranges(
+    signals_num: usize, inputs: &InputList, witness_signals: &[usize],
+    io_map: &TemplateInstanceIOMap, templates_len: usize) -> std::io::Result<()> {
+
+    for (idx, witness_idx) in witness_signals.iter().enumerate() {
+        if *witness_idx >= signals_num {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "witness signal {} is out of bounds: {} >= {}",
+                    idx, witness_idx, signals_num)));
+        }
+    }
+
+    for (name, offset, len) in inputs {
+        let end = offset.checked_add(*len)
+            .ok_or_else(|| Error::new(
+                ErrorKind::InvalidData,
+                format!("input signal {} span overflows", name)))?;
+        if end > signals_num {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "input signal {} span {}..{} exceeds signals {}",
+                    name, offset, end, signals_num)));
+        }
+    }
+
+    for (template_id, io_defs) in io_map {
+        if *template_id >= templates_len {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                format!(
+                    "io_map template id {} is out of bounds (templates: {})",
+                    template_id, templates_len)));
+        }
+        for (idx, io_def) in io_defs.iter().enumerate() {
+            let len = io_def.lengths.iter().try_fold(1usize, |acc, len| {
+                acc.checked_mul(*len)
+                    .ok_or_else(|| Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "io_map template {} definition {} length overflows",
+                            template_id, idx)))
+            })?;
+            let end = io_def.offset.checked_add(len)
+                .ok_or_else(|| Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "io_map template {} definition {} span overflows",
+                        template_id, idx)))?;
+            if end > signals_num {
+                return Err(Error::new(
+                    ErrorKind::InvalidData,
+                    format!(
+                        "io_map template {} definition {} span {}..{} exceeds signals {}",
+                        template_id, idx, io_def.offset, end, signals_num)));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 struct WriteBackReader<R: Read> {
@@ -993,9 +1099,10 @@ pub fn deserialize_witnesscalc_vm2_body<T: FieldOps>(
 mod tests {
     use num_traits::Num;
     use std::collections::HashMap;
+    use std::mem::size_of;
     use crate::graph::{Node, NodesInterface, Operation, TresOperation, UnoOperation, VecNodes};
     use byteorder::ByteOrder;
-    use crate::vm::ComponentTmpl;
+    use crate::vm::{ComponentTmpl, OpCode};
     use crate::field::{bn254_prime, FieldOperations, U254, U64};
     use crate::InputSignalsInfo;
     use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
@@ -1173,48 +1280,25 @@ mod tests {
 
         let mut buf: Vec<u8> = Vec::new();
 
-        let mut io_map = TemplateInstanceIOMap::new();
-        let io_list = vec![
-            IODef {
-                code: 1,
-                offset: 2,
-                lengths: vec![3, 4, 5],
-            },
-            IODef {
-                code: 6,
-                offset: 7,
-                lengths: vec![8, 9, 10],
-            },
-        ];
-        io_map.insert(100, io_list);
+        let io_map = TemplateInstanceIOMap::new();
 
         let cs = CompiledCircuit {
-            main_template_id: 2,
+            main_template_id: 0,
             templates: vec![
                 Template{
                     name: "tmpl1".to_string(),
-                    code: vec![1, 2, 3],
-                    line_numbers: vec![10, 20, 30],
+                    code: vec![OpCode::NoOp as u8],
+                    line_numbers: vec![10],
                     components: vec![
                         ComponentTmpl{
                             symbol: "sym1".to_string(),
-                            sub_cmp_idx: 1,
-                            number_of_cmp: 2,
+                            sub_cmp_idx: 0,
+                            number_of_cmp: 1,
                             name_subcomponent: "sub1".to_string(),
                             signal_offset: 3,
                             signal_offset_jump: 4,
-                            template_id: 5,
+                            template_id: 1,
                             has_inputs: true,
-                        },
-                        ComponentTmpl{
-                            symbol: "sym2".to_string(),
-                            sub_cmp_idx: 10,
-                            number_of_cmp: 20,
-                            name_subcomponent: "sub2".to_string(),
-                            signal_offset: 30,
-                            signal_offset_jump: 40,
-                            template_id: 50,
-                            has_inputs: false,
                         },
                     ],
                     var_stack_depth: 4,
@@ -1222,8 +1306,8 @@ mod tests {
                 },
                 Template{
                     name: "tmpl2".to_string(),
-                    code: vec![10, 20, 30],
-                    line_numbers: vec![100, 200, 300],
+                    code: vec![OpCode::NoOp as u8],
+                    line_numbers: vec![100],
                     components: vec![],
                     var_stack_depth: 40,
                     number_of_inputs: 50,
@@ -1233,11 +1317,11 @@ mod tests {
                 Function{
                     name: "func1".to_string(),
                     symbol: "sym1".to_string(),
-                    code: vec![1, 2, 3],
-                    line_numbers: vec![10, 20, 30],
+                    code: vec![OpCode::FnReturn as u8, 0, 0, 0, 0],
+                    line_numbers: vec![10, 20, 30, 40, 50],
                 },
             ],
-            signals_num: 3,
+            signals_num: 20,
             constants: vec![U256::from(100500)],
             inputs: vec![("inp1".to_string(), 5, 10)],
             witness_signals: vec![1, 2, 3],
@@ -1251,6 +1335,182 @@ mod tests {
         // println!("{:?}", cs2);
 
         assert_eq!(format!("{:?}", cs), format!("{:?}", cs2));
+    }
+
+    fn minimal_legacy_circuit(
+        code: Vec<u8>, components: Vec<ComponentTmpl>,
+        functions: Vec<Function>) -> CompiledCircuit {
+
+        CompiledCircuit {
+            main_template_id: 0,
+            templates: vec![Template {
+                name: "main".to_string(),
+                code,
+                line_numbers: vec![],
+                components,
+                var_stack_depth: 0,
+                number_of_inputs: 0,
+            }],
+            functions,
+            signals_num: 1,
+            constants: vec![],
+            inputs: vec![],
+            witness_signals: vec![],
+            io_map: TemplateInstanceIOMap::new(),
+        }
+    }
+
+    fn deserialize_legacy_err(circuit: &CompiledCircuit) -> String {
+        let mut artifact = Vec::new();
+        serialize_witnesscalc_vm(&mut artifact, circuit).unwrap();
+        deserialize_witnesscalc_vm(&artifact[..])
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_invalid_legacy_opcode() {
+        let circuit = minimal_legacy_circuit(vec![12], vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("invalid opcode byte"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_truncated_legacy_immediate() {
+        let circuit = minimal_legacy_circuit(
+            vec![OpCode::Push4 as u8],
+            vec![],
+            vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("truncated operand"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_cmp_call_out_of_range() {
+        let mut code = vec![OpCode::CmpCall as u8];
+        code.extend(0_u32.to_le_bytes());
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("CmpCall target"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_function_call_out_of_range() {
+        let mut code = vec![OpCode::FnCall as u8];
+        code.extend(0_u32.to_le_bytes());
+        code.extend(0_u32.to_le_bytes());
+        code.extend(0_u32.to_le_bytes());
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("FnCall target"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_constant_out_of_range() {
+        let mut code = vec![OpCode::GetConstant8 as u8];
+        code.extend(0_usize.to_le_bytes());
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("GetConstant8 target"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_jump_into_immediate() {
+        let mut code = vec![OpCode::Push8 as u8];
+        code.extend(0_usize.to_le_bytes());
+        code.push(OpCode::Jump as u8);
+        let offset = 1_i32 - (code.len() as i32 + size_of::<i32>() as i32);
+        code.extend(offset.to_le_bytes());
+
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("targeting non-instruction byte"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_stack_underflow() {
+        let circuit = minimal_legacy_circuit(vec![OpCode::OpMul as u8], vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("stack values available"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_function_fallthrough() {
+        let function = Function {
+            name: "f".to_string(),
+            symbol: "f".to_string(),
+            code: vec![OpCode::NoOp as u8],
+            line_numbers: vec![],
+        };
+        let circuit = minimal_legacy_circuit(vec![OpCode::NoOp as u8], vec![], vec![function]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("falls through without FnReturn"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_branch_stack_underflow() {
+        let mut code = vec![OpCode::Push8 as u8];
+        code.extend(0_usize.to_le_bytes());
+        code.push(OpCode::JumpIfFalse as u8);
+        code.extend(9_i32.to_le_bytes());
+        code.push(OpCode::Push8 as u8);
+        code.extend(1_usize.to_le_bytes());
+        code.push(OpCode::Push8 as u8);
+        code.extend(3_usize.to_le_bytes());
+        code.push(OpCode::OpMul as u8);
+
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("inconsistent stack depths"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_function_return_mismatch() {
+        let mut code = vec![OpCode::FnCall as u8];
+        code.extend(0_u32.to_le_bytes());
+        code.extend(0_u32.to_le_bytes());
+        code.extend(1_u32.to_le_bytes());
+
+        let function = Function {
+            name: "f".to_string(),
+            symbol: "f".to_string(),
+            code: vec![OpCode::FnReturn as u8, 0, 0, 0, 0],
+            line_numbers: vec![],
+        };
+        let circuit = minimal_legacy_circuit(code, vec![], vec![function]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("FnCall return count"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_mapped_signal_without_io_map() {
+        let mut code = vec![OpCode::Push4 as u8];
+        code.extend(0_u32.to_le_bytes());
+        code.push(OpCode::GetSubSignal as u8);
+        code.extend(1_u32.to_le_bytes());
+        code.push(0b1000_0000);
+        code.extend(0_u32.to_le_bytes());
+        code.extend(0_u32.to_le_bytes());
+
+        let circuit = minimal_legacy_circuit(code, vec![], vec![]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("mapped signal access"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_witness_out_of_range() {
+        let mut circuit = minimal_legacy_circuit(vec![OpCode::NoOp as u8], vec![], vec![]);
+        circuit.witness_signals = vec![1];
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("witness signal"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_rejects_legacy_input_span_out_of_range() {
+        let mut circuit = minimal_legacy_circuit(vec![OpCode::NoOp as u8], vec![], vec![]);
+        circuit.inputs = vec![("a".to_string(), 1, 1)];
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("input signal a span"), "got: {err}");
     }
 
     #[test]
