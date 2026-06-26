@@ -1513,6 +1513,42 @@ mod tests {
     }
 
     #[test]
+    fn deserialize_vm_rejects_legacy_reachable_function_jump_to_fallthrough() {
+        let mut function_code = vec![OpCode::Jump as u8];
+        function_code.extend(0_i32.to_le_bytes());
+
+        let function = Function {
+            name: "f".to_string(),
+            symbol: "f".to_string(),
+            code: function_code,
+            line_numbers: vec![],
+        };
+        let circuit = minimal_legacy_circuit(vec![OpCode::NoOp as u8], vec![], vec![function]);
+        let err = deserialize_legacy_err(&circuit);
+        assert!(err.contains("falls through without FnReturn"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_accepts_legacy_unreachable_function_jump_to_fallthrough() {
+        let mut function_code = vec![OpCode::FnReturn as u8];
+        function_code.extend(0_u32.to_le_bytes());
+        function_code.push(OpCode::Jump as u8);
+        function_code.extend(0_i32.to_le_bytes());
+
+        let function = Function {
+            name: "f".to_string(),
+            symbol: "f".to_string(),
+            code: function_code,
+            line_numbers: vec![],
+        };
+        let circuit = minimal_legacy_circuit(vec![OpCode::NoOp as u8], vec![], vec![function]);
+        let mut artifact = Vec::new();
+        serialize_witnesscalc_vm(&mut artifact, &circuit).unwrap();
+
+        deserialize_witnesscalc_vm(&artifact[..]).unwrap();
+    }
+
+    #[test]
     fn deserialize_vm_rejects_legacy_branch_stack_underflow() {
         let mut code = vec![OpCode::Push8 as u8];
         code.extend(0_usize.to_le_bytes());

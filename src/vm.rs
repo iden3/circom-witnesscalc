@@ -774,11 +774,7 @@ fn validate_instruction_stream(
 
     for (target, op, op_ip) in jump_targets {
         if target == code.len() {
-            if matches!(context, CodeContext::Function) {
-                return Err(format!(
-                    "{} has {:?} at ip {} targeting function fallthrough",
-                    owner, op, op_ip));
-            }
+            continue;
         } else if !instruction_starts.contains(&target) {
             return Err(format!(
                 "{} has {:?} at ip {} targeting non-instruction byte {}",
@@ -2098,10 +2094,10 @@ pub fn execute(
                         }
                     }
 
+                    let subcomponent = get_subcomponent(&cmp, cmp_idx)?;
                     vm.call_frames.push(
                         Frame::new_component(
-                            cmp.borrow().subcomponents[cmp_idx as usize].clone(),
-                            templates));
+                            subcomponent, templates));
 
                     ip = 0usize;
                     match vm.call_frames.last().unwrap() {
@@ -2343,6 +2339,7 @@ pub fn execute(
                     }
                 };
 
+                let subcomponent = get_subcomponent(&cmp, cmp_idx)?;
                 match vm.call_frames.last_mut().unwrap() {
                     Frame::Component { ip: ip_local, .. } => {
                         *ip_local = ip;
@@ -2354,8 +2351,7 @@ pub fn execute(
 
                 vm.call_frames.push(
                     Frame::new_component(
-                        cmp.borrow().subcomponents[cmp_idx as usize].clone(),
-                        templates));
+                        subcomponent, templates));
 
                 ip = 0usize;
                 match vm.call_frames.last().unwrap() {
