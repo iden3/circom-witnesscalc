@@ -38,20 +38,18 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     let mut br = WriteBackReader::new(r);
     let md: crate::proto::GraphMetadata = read_message(&mut br)?;
 
-    let (prime, curve_name) = if md.prime.is_none() {
-        (
+    let (prime, curve_name) = match &md.prime {
+        None => (
             U254::from_str(
                 "21888242871839275222246405745257275088548364400416034343698204186575808495617")
                 .unwrap(),
             "bn128"
-        )
-    } else {
-        (
-            <U254 as FieldOps>::from_le_bytes(
-                md.prime.unwrap().value_le.as_slice())
+        ),
+        Some(p) => (
+            <U254 as FieldOps>::from_le_bytes(p.value_le.as_slice())
                 .unwrap(),
             md.prime_str.as_str()
-        )
+        ),
     };
 
     let outer_nodes: Box<dyn NodesInterface> = match prime.bit_len() {
