@@ -380,8 +380,69 @@ pub enum OpCode {
     Assert         = 46,
 }
 
+impl TryFrom<u8> for OpCode {
+    type Error = ();
+
+    // The discriminants are not contiguous (12 is unused), so an exhaustive
+    // match is the only sound decode: transmuting an out-of-range or gap byte
+    // would be undefined behavior.
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        Ok(match value {
+            0 => OpCode::NoOp,
+            1 => OpCode::GetConstant8,
+            2 => OpCode::Push8,
+            3 => OpCode::Push4,
+            4 => OpCode::GetVariable4,
+            5 => OpCode::GetVariable,
+            6 => OpCode::SetVariable4,
+            7 => OpCode::SetVariable,
+            8 => OpCode::GetSelfSignal4,
+            9 => OpCode::GetSelfSignal,
+            10 => OpCode::SetSelfSignal4,
+            11 => OpCode::SetSelfSignal,
+            13 => OpCode::GetSubSignal,
+            14 => OpCode::SetSubSignal,
+            15 => OpCode::JumpIfFalse,
+            16 => OpCode::Jump,
+            17 => OpCode::OpMul,
+            18 => OpCode::OpDiv,
+            19 => OpCode::OpAdd,
+            20 => OpCode::OpSub,
+            21 => OpCode::OpPow,
+            22 => OpCode::OpIntDiv,
+            23 => OpCode::OpMod,
+            24 => OpCode::OpShL,
+            25 => OpCode::OpShR,
+            26 => OpCode::OpLtE,
+            27 => OpCode::OpGtE,
+            28 => OpCode::OpLt,
+            29 => OpCode::OpGt,
+            30 => OpCode::OpEq,
+            31 => OpCode::OpNe,
+            32 => OpCode::OpBoolOr,
+            33 => OpCode::OpBoolAnd,
+            34 => OpCode::OpBoolNot,
+            35 => OpCode::OpBitOr,
+            36 => OpCode::OpBitAnd,
+            37 => OpCode::OpBitXor,
+            38 => OpCode::OpBitNot,
+            39 => OpCode::OpNeg,
+            40 => OpCode::OpToAddr,
+            41 => OpCode::OpMulAddr,
+            42 => OpCode::OpAddAddr,
+            43 => OpCode::CmpCall,
+            44 => OpCode::FnCall,
+            45 => OpCode::FnReturn,
+            46 => OpCode::Assert,
+            _ => return Err(()),
+        })
+    }
+}
+
 fn read_instruction(code: &[u8], ip: usize) -> OpCode {
-    unsafe { std::mem::transmute::<u8, OpCode>(code[ip]) }
+    let byte = code[ip];
+    OpCode::try_from(byte)
+        .unwrap_or_else(|()| panic!("invalid opcode byte {byte} at ip {ip}"))
 }
 
 fn read_usize(code: &[u8], ip: usize) -> usize {
@@ -446,7 +507,13 @@ pub fn disassemble_instruction(
 
     print!("{:08x} [{:10}:{:4}] ", ip, name, line_numbers[ip]);
 
-    let op = unsafe { std::mem::transmute::<u8, OpCode>(code[ip]) };
+    let op = match OpCode::try_from(code[ip]) {
+        Ok(op) => op,
+        Err(()) => {
+            println!("<invalid opcode 0x{:02x}>", code[ip]);
+            return ip + 1;
+        }
+    };
     let mut ip = ip + 1;
 
 
@@ -1591,6 +1658,21 @@ pub fn execute(
 
 #[cfg(test)]
 mod tests {
+    use super::OpCode;
+
     #[test]
     fn ok() {}
+
+    #[test]
+    fn opcode_try_from_rejects_unused_and_out_of_range_bytes() {
+        // Defined opcodes decode and round-trip.
+        for &byte in &[0u8, 1, 11, 13, 17, 46] {
+            assert_eq!(OpCode::try_from(byte).unwrap() as u8, byte);
+        }
+        // 12 is an unused discriminant; anything above the last opcode is invalid.
+        // Both must be rejected rather than transmuted into an invalid variant.
+        assert!(OpCode::try_from(12).is_err());
+        assert!(OpCode::try_from(47).is_err());
+        assert!(OpCode::try_from(u8::MAX).is_err());
+    }
 }
