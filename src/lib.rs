@@ -51,12 +51,14 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
         let bs = error_msg.as_bytes();
         unsafe {
             (*status).code = code;
-            (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
-            if (*status).error_msg.is_null() {
+            (*status).error_msg = std::ptr::null_mut();
+            let error_msg_ptr = libc::malloc(bs.len()+1) as *mut c_char;
+            if error_msg_ptr.is_null() {
                 return;
             }
-            libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
-            *((*status).error_msg.add(bs.len())) = 0;
+            libc::memcpy(error_msg_ptr as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
+            *(error_msg_ptr.add(bs.len())) = 0;
+            (*status).error_msg = error_msg_ptr;
         }
     }
 }
@@ -111,6 +113,21 @@ unsafe fn gw_calc_witness_inner(
     wtns_data: *mut *mut c_void, wtns_len: *mut usize,
     status: *mut gw_status_t) -> c_int {
 
+    if wtns_data.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "wtns_data is null");
+        return 1;
+    }
+
+    if wtns_len.is_null() {
+        prepare_status(status, GW_ERROR_CODE_ERROR, "wtns_len is null");
+        return 1;
+    }
+
+    unsafe {
+        *wtns_data = std::ptr::null_mut();
+        *wtns_len = 0;
+    }
+
     if inputs.is_null() {
         prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
         return 1;
@@ -123,16 +140,6 @@ unsafe fn gw_calc_witness_inner(
 
     if graph_data_len == 0 {
         prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data_len is 0");
-        return 1;
-    }
-
-    if wtns_data.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "wtns_data is null");
-        return 1;
-    }
-
-    if wtns_len.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "wtns_len is null");
         return 1;
     }
 
@@ -690,6 +697,15 @@ mod tests {
         }
     }
 
+    fn stale_witness_data() -> *mut c_void {
+        ptr::NonNull::<u8>::dangling().as_ptr() as *mut c_void
+    }
+
+    fn assert_witness_outputs_empty(wtns_data: *mut c_void, wtns_len: usize) {
+        assert!(wtns_data.is_null());
+        assert_eq!(wtns_len, 0);
+    }
+
     #[test]
     fn ffi_success_sets_ok_status_and_writes_witness() {
         let inputs = CString::new(
@@ -730,6 +746,109 @@ mod tests {
     fn ffi_free_wtns_data_accepts_null() {
         unsafe {
             super::gw_free_wtns_data(ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn ffi_error_resets_outputs_for_invalid_graph_data() {
+        let inputs = CString::new("{}").unwrap();
+        let graph_data = [0_u8];
+        let mut wtns_data = stale_witness_data();
+        let mut wtns_len = usize::MAX;
+        let mut status = empty_status(super::GW_ERROR_CODE_OK);
+
+        let result = unsafe {
+            super::gw_calc_witness(
+                inputs.as_ptr(),
+                graph_data.as_ptr() as *const c_void,
+                graph_data.len(),
+                &mut wtns_data,
+                &mut wtns_len,
+                &mut status,
+            )
+        };
+
+        assert_eq!(result, 1);
+        assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
+        let message = take_status_message(&mut status);
+        assert!(message.contains("Failed to calculate witness"));
+        assert_witness_outputs_empty(wtns_data, wtns_len);
+    }
+
+    #[test]
+    fn ffi_error_resets_outputs_for_invalid_input_json() {
+        let inputs = CString::new("{").unwrap();
+        let graph_data = include_bytes!("../tests/vm2_setup/data/test_init_signals__bc2.wcd");
+        let mut wtns_data = stale_witness_data();
+        let mut wtns_len = usize::MAX;
+        let mut status = empty_status(super::GW_ERROR_CODE_OK);
+
+        let result = unsafe {
+            super::gw_calc_witness(
+                inputs.as_ptr(),
+                graph_data.as_ptr() as *const c_void,
+                graph_data.len(),
+                &mut wtns_data,
+                &mut wtns_len,
+                &mut status,
+            )
+        };
+
+        assert_eq!(result, 1);
+        assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
+        let message = take_status_message(&mut status);
+        assert!(message.contains("Failed to calculate witness"));
+        assert_witness_outputs_empty(wtns_data, wtns_len);
+    }
+
+    #[test]
+    fn ffi_error_resets_outputs_for_invalid_arguments() {
+        let inputs = CString::new("{}").unwrap();
+        let graph_data = [0_u8];
+        let graph_data_ptr = graph_data.as_ptr() as *const c_void;
+
+        let cases = [
+            (
+                ptr::null(),
+                graph_data_ptr,
+                graph_data.len(),
+                "inputs is null",
+            ),
+            (
+                inputs.as_ptr(),
+                ptr::null(),
+                graph_data.len(),
+                "graph_data is null",
+            ),
+            (
+                inputs.as_ptr(),
+                graph_data_ptr,
+                0,
+                "graph_data_len is 0",
+            ),
+        ];
+
+        for (inputs_ptr, graph_data_ptr, graph_data_len, expected_message) in cases {
+            let mut wtns_data = stale_witness_data();
+            let mut wtns_len = usize::MAX;
+            let mut status = empty_status(super::GW_ERROR_CODE_OK);
+
+            let result = unsafe {
+                super::gw_calc_witness(
+                    inputs_ptr,
+                    graph_data_ptr,
+                    graph_data_len,
+                    &mut wtns_data,
+                    &mut wtns_len,
+                    &mut status,
+                )
+            };
+
+            assert_eq!(result, 1);
+            assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
+            let message = take_status_message(&mut status);
+            assert_eq!(message, expected_message);
+            assert_witness_outputs_empty(wtns_data, wtns_len);
         }
     }
 
@@ -784,7 +903,7 @@ mod tests {
     fn ffi_rejects_null_wtns_data() {
         let inputs = CString::new("{}").unwrap();
         let graph_data = [0_u8];
-        let mut wtns_len = 0;
+        let mut wtns_len = usize::MAX;
         let mut status = empty_status(super::GW_ERROR_CODE_OK);
 
         let result = unsafe {
@@ -802,13 +921,14 @@ mod tests {
         assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
         let message = take_status_message(&mut status);
         assert_eq!(message, "wtns_data is null");
+        assert_eq!(wtns_len, usize::MAX);
     }
 
     #[test]
     fn ffi_rejects_null_wtns_len() {
         let inputs = CString::new("{}").unwrap();
         let graph_data = [0_u8];
-        let mut wtns_data = ptr::null_mut();
+        let mut wtns_data = stale_witness_data();
         let mut status = empty_status(super::GW_ERROR_CODE_OK);
 
         let result = unsafe {
@@ -826,14 +946,15 @@ mod tests {
         assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
         let message = take_status_message(&mut status);
         assert_eq!(message, "wtns_len is null");
+        assert_eq!(wtns_data, stale_witness_data());
     }
 
     #[test]
     fn ffi_converts_internal_panic_to_error_status() {
         let inputs = CString::new("{}").unwrap();
         let graph_data = b"wtns.graph.002";
-        let mut wtns_data = ptr::null_mut();
-        let mut wtns_len = 0;
+        let mut wtns_data = stale_witness_data();
+        let mut wtns_len = usize::MAX;
         let mut status = empty_status(super::GW_ERROR_CODE_OK);
 
         let result = unsafe {
@@ -851,8 +972,7 @@ mod tests {
         assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
         let message = take_status_message(&mut status);
         assert_eq!(message, "panic while calculating witness");
-        assert!(wtns_data.is_null());
-        assert_eq!(wtns_len, 0);
+        assert_witness_outputs_empty(wtns_data, wtns_len);
     }
 
     #[test]

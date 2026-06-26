@@ -19,6 +19,9 @@ typedef struct {
 
 // On success, gw_calc_witness writes heap-allocated witness bytes to wtns_data
 // and their length to wtns_len. Release wtns_data with gw_free_wtns_data.
+// If either output pointer is NULL, gw_calc_witness returns an error without
+// writing witness outputs. After both output pointers have been validated,
+// every error resets *wtns_data to NULL and *wtns_len to 0.
 // status.error_msg is owned separately and must be released with gw_free_status.
 int
 gw_calc_witness(const char *inputs,

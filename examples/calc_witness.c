@@ -118,7 +118,7 @@ main(int argc, char *argv[]) {
   void *wtns_data = NULL;
   size_t wtns_len = 0;
  
-  gw_status_t status;
+  gw_status_t status = { .code = OK, .error_msg = NULL };
   int r = gw_calc_witness(inputs_json_data, graph_data, graph_length, &wtns_data, &wtns_len, &status);
   if (r != 0) {
 	fprintf(stderr, "Error code: %i\n", status.code);
