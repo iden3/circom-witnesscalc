@@ -795,29 +795,28 @@ fn validate_mapped_signal_operand(
     };
     let template = &templates[template_id];
     let mut checked_any_child = false;
+    let mut checked_compatible_child = false;
     for component in template.components.iter()
         .filter(|component| component.number_of_cmp > 0) {
 
         checked_any_child = true;
-        let io_defs = io_map.get(&component.template_id)
-            .ok_or_else(|| format!(
-                "{} has mapped signal access at ip {}, but template {} has no io_map entry",
-                owner, op_ip, component.template_id))?;
-        let io_def = io_defs.get(signal_code as usize)
-            .ok_or_else(|| format!(
-                "{} has mapped signal code {} at ip {}, but template {} has only {} io_defs",
-                owner, signal_code, op_ip, component.template_id, io_defs.len()))?;
-        if io_def.lengths.len() != indexes_num {
-            return Err(format!(
-                "{} has mapped signal code {} at ip {} with {} indexes, but template {} expects {}",
-                owner, signal_code, op_ip, indexes_num,
-                component.template_id, io_def.lengths.len()));
+        if let Some(io_defs) = io_map.get(&component.template_id) {
+            if let Some(io_def) = io_defs.get(signal_code as usize) {
+                if io_def.lengths.len() == indexes_num {
+                    checked_compatible_child = true;
+                }
+            }
         }
     }
     if !checked_any_child {
         return Err(format!(
             "{} has mapped signal access at ip {}, but template {} has no subcomponents",
             owner, op_ip, template_id));
+    }
+    if !checked_compatible_child {
+        return Err(format!(
+            "{} has mapped signal code {} at ip {} with {} indexes, but no subcomponent template has a compatible io_map entry",
+            owner, signal_code, op_ip, indexes_num));
     }
 
     Ok(())
@@ -1566,43 +1565,60 @@ pub fn disassemble_instruction(
 
 fn calc_mapped_signal_idx(
     template_id: usize, io_map: &TemplateInstanceIOMap,
-    signal_code: u32, indexes: &[u32]) -> u32 {
+    signal_code: u32, indexes: &[u32]) -> Result<u32, String> {
 
-    let signals = io_map.get(&template_id).unwrap_or_else(|| panic!("template not found: {}", template_id));
-    let def = &signals[signal_code as usize];
+    let signals = io_map.get(&template_id)
+        .ok_or_else(|| format!("template not found in io_map: {}", template_id))?;
+    let def = signals.get(signal_code as usize)
+        .ok_or_else(|| format!(
+            "signal code {} not found in io_map for template {}",
+            signal_code, template_id))?;
     let mut sig_idx: u32 = def.offset.try_into()
-        .expect("Signal index is too large");
+        .map_err(|_| "Signal index is too large".to_string())?;
 
     if indexes.is_empty() {
-        return sig_idx;
+        if def.lengths.is_empty() {
+            return Ok(sig_idx);
+        }
+        return Err(format!(
+            "mapped signal code {} for template {} expects {} indexes, got 0",
+            signal_code, template_id, def.lengths.len()));
     }
 
-    assert_eq!(def.lengths.len(), indexes.len());
+    if def.lengths.len() != indexes.len() {
+        return Err(format!(
+            "mapped signal code {} for template {} expects {} indexes, got {}",
+            signal_code, template_id, def.lengths.len(), indexes.len()));
+    }
 
     // Compute strides
     let mut strides = vec![1u32; def.lengths.len()];
     for i in (0..def.lengths.len() - 1).rev() {
-        let ln: u32 = def.lengths[i+1].try_into().expect("Length is too large");
-        let (s, overflowed) = strides[i+1].overflowing_mul(ln);
-        if overflowed {
-            panic!("Stride is too large");
-        }
-        strides[i] = s;
+        let ln: u32 = def.lengths[i+1].try_into()
+            .map_err(|_| "Length is too large".to_string())?;
+        strides[i] = strides[i+1].checked_mul(ln)
+            .ok_or_else(|| "Stride is too large".to_string())?;
     }
 
     for (i, idx_ip) in indexes.iter().enumerate() {
-        let (x, mut overflow) = idx_ip.overflowing_mul(strides[i]);
-        if overflow {
-            panic!("Index is too large");
-        }
+        let x = idx_ip.checked_mul(strides[i])
+            .ok_or_else(|| "Index is too large".to_string())?;
 
-        (sig_idx, overflow) = sig_idx.overflowing_add(x);
-        if overflow {
-            panic!("Signal index is too large");
-        }
+        sig_idx = sig_idx.checked_add(x)
+            .ok_or_else(|| "Signal index is too large".to_string())?;
     };
 
-    sig_idx
+    Ok(sig_idx)
+}
+
+fn get_subcomponent(
+    component: &Rc<RefCell<Component>>, cmp_idx: u32) -> Result<Rc<RefCell<Component>>, String> {
+
+    let cmp_idx: usize = cmp_idx.try_into()
+        .map_err(|_| "Subcomponent index is too large".to_string())?;
+    component.borrow().subcomponents.get(cmp_idx)
+        .cloned()
+        .ok_or_else(|| format!("Subcomponent index {} is out of bounds", cmp_idx))
 }
 
 pub fn build_component(
@@ -1648,7 +1664,7 @@ pub fn execute(
     component: Rc<RefCell<Component>>, templates: &Vec<Template>,
     functions: &[Function], constants: &Vec<U256>,
     signals: &mut [Option<U256>], io_map: &TemplateInstanceIOMap,
-    expected_signals: Option<&Vec<U256>>) {
+    expected_signals: Option<&Vec<U256>>) -> Result<(), String> {
 
     let mut vm = VM {
         templates,
@@ -1966,16 +1982,16 @@ pub fn execute(
 
                     let indexes = vm.stack_u32.split_off(indexes_idx);
 
-                    let subcmp_template_id = cmp.borrow()
-                        .subcomponents[cmp_idx as usize].borrow()
-                        .template_id;
+                    let subcomponent = get_subcomponent(cmp, cmp_idx)?;
+                    let subcmp_template_id = subcomponent.borrow().template_id;
 
-                    calc_mapped_signal_idx(subcmp_template_id, io_map, signal_code, &indexes)
+                    calc_mapped_signal_idx(subcmp_template_id, io_map, signal_code, &indexes)?
                 } else {
                     vm.stack_u32.pop().unwrap()
                 };
 
-                let subcmp_signals_start = cmp.borrow().subcomponents[cmp_idx as usize].borrow().signals_start;
+                let subcomponent = get_subcomponent(cmp, cmp_idx)?;
+                let subcmp_signals_start = subcomponent.borrow().signals_start;
 
                 let (sig_start, overflowed) =
                     subcmp_signals_start.overflowing_add(sig_idx as usize);
@@ -2024,11 +2040,10 @@ pub fn execute(
 
                     let indexes = vm.stack_u32.split_off(indexes_number as usize);
 
-                    let subcmp_template_id = cmp.borrow()
-                        .subcomponents[cmp_idx as usize].borrow()
-                        .template_id;
+                    let subcomponent = get_subcomponent(&cmp, cmp_idx)?;
+                    let subcmp_template_id = subcomponent.borrow().template_id;
 
-                    calc_mapped_signal_idx(subcmp_template_id, io_map, signal_code, &indexes)
+                    calc_mapped_signal_idx(subcmp_template_id, io_map, signal_code, &indexes)?
                 } else {
                     vm.stack_u32.pop().unwrap()
                 };
@@ -2038,9 +2053,8 @@ pub fn execute(
                 }
 
                 let should_call_cmp = {
-                    let cmp = cmp.borrow();
-                    let mut subcmp = cmp
-                        .subcomponents[cmp_idx as usize].borrow_mut();
+                    let subcomponent = get_subcomponent(&cmp, cmp_idx)?;
+                    let mut subcmp = subcomponent.borrow_mut();
 
                     let (sigs_start, overflowed) =
                         subcmp.signals_start.overflowing_add(sig_idx as usize);
@@ -2448,6 +2462,8 @@ pub fn execute(
             vm.print_stack_u32();
         }
     }
+
+    Ok(())
 }
 
 #[cfg(test)]

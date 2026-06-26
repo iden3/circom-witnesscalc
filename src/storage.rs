@@ -1098,11 +1098,13 @@ pub fn deserialize_witnesscalc_vm2_body<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use num_traits::Num;
+    use std::cell::RefCell;
     use std::collections::HashMap;
     use std::mem::size_of;
+    use std::rc::Rc;
     use crate::graph::{Node, NodesInterface, Operation, TresOperation, UnoOperation, VecNodes};
     use byteorder::ByteOrder;
-    use crate::vm::{ComponentTmpl, OpCode};
+    use crate::vm::{build_component, execute, ComponentTmpl, OpCode};
     use crate::field::{bn254_prime, FieldOperations, U254, U64};
     use crate::InputSignalsInfo;
     use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
@@ -1360,6 +1362,69 @@ mod tests {
         }
     }
 
+    fn mapped_get_subsignal_code(cmp_idx: u32) -> Vec<u8> {
+        let mut code = vec![OpCode::Push4 as u8];
+        code.extend(cmp_idx.to_le_bytes());
+        code.push(OpCode::GetSubSignal as u8);
+        code.extend(1_u32.to_le_bytes());
+        code.push(0b1000_0000);
+        code.extend(0_u32.to_le_bytes());
+        code.extend(0_u32.to_le_bytes());
+        code
+    }
+
+    fn heterogeneous_mapped_legacy_circuit(cmp_idx: u32) -> CompiledCircuit {
+        let components = vec![
+            ComponentTmpl {
+                symbol: "a".to_string(),
+                sub_cmp_idx: 0,
+                number_of_cmp: 1,
+                name_subcomponent: "a".to_string(),
+                signal_offset: 0,
+                signal_offset_jump: 0,
+                template_id: 1,
+                has_inputs: false,
+            },
+            ComponentTmpl {
+                symbol: "b".to_string(),
+                sub_cmp_idx: 1,
+                number_of_cmp: 1,
+                name_subcomponent: "b".to_string(),
+                signal_offset: 1,
+                signal_offset_jump: 0,
+                template_id: 2,
+                has_inputs: false,
+            },
+        ];
+        let mut circuit = minimal_legacy_circuit(
+            mapped_get_subsignal_code(cmp_idx),
+            components,
+            vec![]);
+        circuit.templates.push(Template {
+            name: "child_a".to_string(),
+            code: vec![OpCode::NoOp as u8],
+            line_numbers: vec![],
+            components: vec![],
+            var_stack_depth: 0,
+            number_of_inputs: 0,
+        });
+        circuit.templates.push(Template {
+            name: "child_b".to_string(),
+            code: vec![OpCode::NoOp as u8],
+            line_numbers: vec![],
+            components: vec![],
+            var_stack_depth: 0,
+            number_of_inputs: 0,
+        });
+        circuit.signals_num = 3;
+        circuit.io_map.insert(1, vec![IODef {
+            code: 0,
+            offset: 0,
+            lengths: vec![],
+        }]);
+        circuit
+    }
+
     fn deserialize_legacy_err(circuit: &CompiledCircuit) -> String {
         let mut artifact = Vec::new();
         serialize_witnesscalc_vm(&mut artifact, circuit).unwrap();
@@ -1495,6 +1560,42 @@ mod tests {
         let circuit = minimal_legacy_circuit(code, vec![], vec![]);
         let err = deserialize_legacy_err(&circuit);
         assert!(err.contains("mapped signal access"), "got: {err}");
+    }
+
+    #[test]
+    fn deserialize_vm_accepts_legacy_heterogeneous_mapped_signal_candidate() {
+        let circuit = heterogeneous_mapped_legacy_circuit(0);
+        let mut artifact = Vec::new();
+        serialize_witnesscalc_vm(&mut artifact, &circuit).unwrap();
+
+        deserialize_witnesscalc_vm(&artifact[..]).unwrap();
+    }
+
+    #[test]
+    fn execute_vm_rejects_legacy_mapped_signal_without_selected_io_map() {
+        let circuit = heterogeneous_mapped_legacy_circuit(1);
+        let mut artifact = Vec::new();
+        serialize_witnesscalc_vm(&mut artifact, &circuit).unwrap();
+        let circuit = deserialize_witnesscalc_vm(&artifact[..]).unwrap();
+        let component = Rc::new(RefCell::new(build_component(
+            &circuit.templates,
+            circuit.main_template_id,
+            1,
+        )));
+        let mut signals = vec![None; circuit.signals_num];
+
+        let err = execute(
+            component,
+            &circuit.templates,
+            &circuit.functions,
+            &circuit.constants,
+            &mut signals,
+            &circuit.io_map,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(err.contains("template not found in io_map: 2"), "got: {err}");
     }
 
     #[test]
