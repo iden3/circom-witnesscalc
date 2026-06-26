@@ -594,7 +594,13 @@ impl<T: FieldOps> FieldOperations for &Field<T> {
 
     #[inline]
     fn modulo(&self, lhs: Self::Type, rhs: Self::Type) -> Self::Type {
-        lhs % rhs
+        if rhs.is_zero() {
+            // Keep witness evaluation total, matching the zero-divisor convention
+            // used by div/idiv.
+            Self::Type::zero()
+        } else {
+            lhs % rhs
+        }
     }
 
     #[inline]

@@ -586,6 +586,8 @@ mod tests {
     use ruint::uint;
     use crate::proto::InputNode;
     use crate::field::{Field, U254, bn254_prime};
+    use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+    use crate::storage::serialize_witnesscalc_graph;
 
     #[test]
     fn test_ok() {
@@ -637,5 +639,26 @@ mod tests {
             U254::from(2),
             U254::from(3)]);
         assert_eq!(res, want);
+    }
+
+    #[test]
+    fn calc_witness_bn254_mod_by_zero_matches_generic() {
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let lhs = nodes.const_node_idx_from_value(U254::from(7u64));
+        let rhs = nodes.const_node_idx_from_value(U254::from(0u64));
+        // Keep the Mod node in the serialized graph so calc_witness exercises runtime dispatch.
+        let output = nodes.push_noopt(Node::Op(Operation::Mod, lhs, rhs)).0;
+
+        let generic = crate::graph::evaluate(
+            &nodes.ff, &nodes.nodes, &[], &[output], &nodes.constants);
+        assert_eq!(generic, vec![U254::from(0u64)]);
+
+        let mut graph_data = Vec::new();
+        serialize_witnesscalc_graph(&mut graph_data, &nodes, &[output], &[], &[]).unwrap();
+        let witness_data = super::calc_witness("{}", &graph_data).unwrap();
+        let witness = wtns_file::WtnsFile::<32>::read(
+            std::io::Cursor::new(witness_data)).unwrap();
+        let expected: [u8; 32] = generic[0].as_le_slice().try_into().unwrap();
+        assert_eq!(witness.witness.0[0].as_bytes(), &expected);
     }
 }

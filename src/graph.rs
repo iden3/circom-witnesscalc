@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fs::File;
-use std::ops::{BitAnd, BitOr, BitXor, Not, Shl, Shr};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use ark_bn254::Fr;
@@ -62,7 +61,15 @@ impl Operation {
             Add => a.add_mod(b, M),
             Sub => a.add_mod(M - b, M),
             Pow => a.pow_mod(b, M),
-            Mod => a.div_rem(b).1,
+            Mod => {
+                if b == U256::ZERO {
+                    // Keep witness evaluation total, matching the zero-divisor convention
+                    // used by Div/Idiv.
+                    U256::ZERO
+                } else {
+                    a.div_rem(b).1
+                }
+            },
             Eq => U256::from(a == b),
             Neq => U256::from(a != b),
             Lt => u_lt(&a, &b),
@@ -75,11 +82,11 @@ impl Operation {
             Shr => compute_shr_uint(a, b),
             // TODO test with conner case when it is possible to get the number
             //      bigger then modulus
-            Bor => a.bitor(b),
-            Band => a.bitand(b),
+            Bor => a | b,
+            Band => a & b,
             // TODO test with conner case when it is possible to get the number
             //      bigger then modulus
-            Bxor => a.bitxor(b),
+            Bxor => a ^ b,
             Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
         }
     }
@@ -189,8 +196,8 @@ impl UnoOperation {
                 U256::ZERO
             },
             UnoOperation::Bnot => {
-                let a = a.not();
-                let mask = U256::ZERO.not().shr(M.leading_zeros());
+                let a = !a;
+                let mask = !U256::ZERO >> M.leading_zeros();
                 let a = a & mask;
                 if a >= M { a - M } else { a }
             },
@@ -207,7 +214,7 @@ fn sqrt_mod_prime(a: U256) -> U256 {
     let zero = U256::ZERO;
     let mut q = M - one;
     let mut s: u32 = 0;
-    while q.bitand(one) == zero {
+    while q & one == zero {
         q >>= 1;
         s += 1;
     }
@@ -940,13 +947,13 @@ impl Error for NodeConstErr {}
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));
     let ls_limb = b.as_limbs()[0];
-    a.shl(ls_limb as usize)
+    a << ls_limb as usize
 }
 
 fn compute_shr_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));
     let ls_limb = b.as_limbs()[0];
-    a.shr(ls_limb as usize)
+    a >> ls_limb as usize
 }
 
 /// All references must be backwards.
@@ -1230,7 +1237,12 @@ pub fn evaluate_bn254<NS: NodesStorage>(
                             if y.is_zero() { U254::from(0u64) } else { x.raw() / y },
                             prime)
                     },
-                    (Operation::Mod, x, y) => Bn254Value::from_raw(x.raw() % y.raw(), prime),
+                    (Operation::Mod, x, y) => {
+                        let y = y.raw();
+                        Bn254Value::from_raw(
+                            if y.is_zero() { U254::from(0u64) } else { x.raw() % y },
+                            prime)
+                    },
                     (Operation::Eq, x, y) => bn254_bool(x.eq_raw(y)),
                     (Operation::Neq, x, y) => bn254_bool(!x.eq_raw(y)),
                     (Operation::Lt, x, y) => {
@@ -1754,6 +1766,10 @@ mod tests {
     #[test]
     fn test_fr_mod() {
         assert_eq!(
+            Operation::Mod.eval(U256::from(7u64), U256::from(0u64)),
+            U256::from(0));
+
+        assert_eq!(
             Operation::Mod.eval(U256::from(7u64), U256::from(2u64)),
             U256::from(1));
 
@@ -1901,7 +1917,7 @@ mod tests {
         let a = BN254::from_str_radix(
             "18583076334226168172367231819260574371431472897769128993835383390508861945746",
             10).unwrap();
-        let a = a.not();
+        let a = !a;
         // let mask = BN254::ZERO.not().shr(m.leading_zeros());
         // let a = a & mask;
         let a = if a >= m { a - m } else { a };
@@ -2033,10 +2049,9 @@ mod tests {
             Operation::Lor,
         ];
 
-        /// Representation-level binary ops. (`Mod` is omitted: it has no zero-divisor guard in
-        /// the field layer and panics in the baseline too.)
-        const REPRESENTATION_OPS: [Operation; 6] = [
-            Operation::Idiv, Operation::Shl, Operation::Shr, Operation::Bor,
+        /// Representation-level binary ops.
+        const REPRESENTATION_OPS: [Operation; 7] = [
+            Operation::Idiv, Operation::Mod, Operation::Shl, Operation::Shr, Operation::Bor,
             Operation::Band, Operation::Bxor,
         ];
 
@@ -2089,11 +2104,6 @@ mod tests {
             for op in ALL_BINARY_OPS {
                 for &x in &values {
                     for &y in &values {
-                        // `modulo` has no zero-divisor guard in the field layer (it panics in
-                        // the baseline too), so skip that one undefined input.
-                        if op == Operation::Mod && y == U254::from(0u64) {
-                            continue;
-                        }
                         let mut nodes = VecNodes::default();
                         nodes.push(Node::Constant(0));
                         nodes.push(Node::Constant(1));
@@ -2136,11 +2146,10 @@ mod tests {
             }
         }
 
-        /// Division and integer division by zero return zero in both evaluators. (`modulo`
-        /// has no zero guard in the field layer and panics in the baseline as well.)
+        /// Division, integer division, and modulo by zero return zero in both evaluators.
         #[test]
         fn by_zero_matches_baseline() {
-            for op in [Operation::Div, Operation::Idiv] {
+            for op in [Operation::Div, Operation::Idiv, Operation::Mod] {
                 let mut nodes = VecNodes::default();
                 nodes.push(Node::Constant(0));
                 nodes.push(Node::Constant(1));
@@ -2150,6 +2159,19 @@ mod tests {
                 assert_eq!(base, mont, "op {op:?} by zero");
                 assert_eq!(mont[0], U254::from(0u64));
             }
+        }
+
+        #[test]
+        fn mod_by_zero_constant_folds_to_zero() {
+            let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+            let lhs = nodes.const_node_idx_from_value(U254::from(7u64));
+            let zero = nodes.const_node_idx_from_value(U254::from(0u64));
+            let folded = nodes.push(Node::Op(Operation::Mod, lhs, zero)).0;
+
+            assert_eq!(folded, zero);
+            assert_eq!(
+                evaluate(&nodes.ff, &nodes.nodes, &[], &[folded], &nodes.constants),
+                vec![U254::from(0u64)]);
         }
 
         /// `to_montgomery` reduces before converting, so a value that lands exactly on the
@@ -2247,6 +2269,36 @@ mod tests {
                     random_graph(&mut rng, &REPRESENTATION_OPS, &ALL_UNO_OPS);
                 let (base, mont) = run_both(&nodes, &inputs, &outputs, &constants);
                 assert_eq!(base, mont);
+            }
+        }
+
+        #[test]
+        fn shift_boundaries_match_baseline() {
+            let p = bn254_prime;
+            let cases = [
+                U254::from(0u64),
+                U254::from(1u64),
+                U254::from(63u64),
+                U254::from(64u64),
+                U254::from(65u64),
+                U254::from(127u64),
+                U254::from(128u64),
+                U254::from(129u64),
+                U254::from(253u64),
+                p - U254::from(1u64),
+                p - U254::from(64u64),
+            ];
+            for op in [Operation::Shl, Operation::Shr] {
+                for rhs in cases {
+                    let mut nodes = VecNodes::default();
+                    nodes.push(Node::Constant(0));
+                    nodes.push(Node::Constant(1));
+                    nodes.push(Node::Op(op, 0, 1));
+                    let (base, mont) = run_both(
+                        &nodes, &[], &[2],
+                        &[U254::from(0x8000_0000_0000_0001u64), rhs]);
+                    assert_eq!(base, mont, "op {op:?} rhs={rhs}");
+                }
             }
         }
 
