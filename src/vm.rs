@@ -434,10 +434,15 @@ impl TryFrom<u8> for OpCode {
     }
 }
 
-fn read_instruction(code: &[u8], ip: usize) -> OpCode {
-    let byte = code[ip];
+fn read_instruction(code: &[u8], ip: usize) -> Result<OpCode, String> {
+    let byte = *code.get(ip).ok_or_else(|| {
+        format!(
+            "instruction pointer {ip} out of bounds (code len {})",
+            code.len()
+        )
+    })?;
     OpCode::try_from(byte)
-        .unwrap_or_else(|()| panic!("invalid opcode byte {byte} at ip {ip}"))
+        .map_err(|()| format!("invalid opcode byte {byte} at ip {ip}"))
 }
 
 fn read_usize(code: &[u8], ip: usize) -> usize {
@@ -1737,7 +1742,7 @@ pub fn execute(
             disassemble_instruction(code, line_numbers, ip, name, functions);
         }
 
-        let op = read_instruction(code, ip);
+        let op = read_instruction(code, ip)?;
         ip += 1;
 
         match op {
@@ -2468,7 +2473,11 @@ pub fn execute(
 
 #[cfg(test)]
 mod tests {
-    use super::OpCode;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use ruint::aliases::U256;
+    use crate::storage::TemplateInstanceIOMap;
+    use super::{build_component, execute, Function, OpCode, Template};
 
     #[test]
     fn ok() {}
@@ -2484,5 +2493,46 @@ mod tests {
         assert!(OpCode::try_from(12).is_err());
         assert!(OpCode::try_from(47).is_err());
         assert!(OpCode::try_from(u8::MAX).is_err());
+    }
+
+    fn execute_unvalidated_code_err(code: Vec<u8>) -> String {
+        let templates = vec![Template {
+            name: "main".to_string(),
+            line_numbers: vec![0; code.len()],
+            code,
+            components: vec![],
+            var_stack_depth: 0,
+            number_of_inputs: 0,
+        }];
+        let functions: Vec<Function> = vec![];
+        let constants = vec![];
+        let io_map = TemplateInstanceIOMap::new();
+        let component = Rc::new(RefCell::new(build_component(&templates, 0, 1)));
+        let mut signals = vec![Some(U256::from(1u64))];
+
+        execute(
+            component,
+            &templates,
+            &functions,
+            &constants,
+            &mut signals,
+            &io_map,
+            None,
+        )
+        .unwrap_err()
+    }
+
+    #[test]
+    fn execute_rejects_invalid_opcode_without_validation() {
+        let err = execute_unvalidated_code_err(vec![12]);
+        assert_eq!(err, "invalid opcode byte 12 at ip 0");
+    }
+
+    #[test]
+    fn execute_rejects_out_of_bounds_instruction_pointer() {
+        let mut code = vec![OpCode::Jump as u8];
+        code.extend(1_i32.to_le_bytes());
+        let err = execute_unvalidated_code_err(code);
+        assert_eq!(err, "instruction pointer 6 out of bounds (code len 5)");
     }
 }
