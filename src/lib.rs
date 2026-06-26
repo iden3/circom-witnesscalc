@@ -676,6 +676,26 @@ mod tests {
     }
 
     #[test]
+    fn calc_witness_rejects_dangling_nested_bus_type() {
+        let mut circuit = minimal_vm2_circuit(vec![], vec![]);
+        circuit.templates[0].outputs = vec![crate::vm2::Signal::Bus(0, vec![])];
+        circuit.types = vec![crate::vm2::Type {
+            name: "outer".to_string(),
+            fields: vec![crate::vm2::TypeField {
+                name: "inner".to_string(),
+                kind: crate::vm2::TypeFieldKind::Bus(7),
+                offset: 0,
+                base_type_size: 1,
+                dims: vec![],
+            }],
+        }];
+
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Invalid type ID: 7"),
+            "expected the nested bus-type guard to reject it, got: {err}");
+    }
+
+    #[test]
     fn test_ok2() {
         let i: InputNode = InputNode {
             idx: 1,
