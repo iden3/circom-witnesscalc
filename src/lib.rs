@@ -514,7 +514,7 @@ pub fn calculate_witness_vm2<T: FieldOps>(
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
     println!("VM2 executed in {:?}", start.elapsed());
 
-    let witness_signals = witness_signals(&component_tree, &circuit.witness);
+    let witness_signals = witness_signals(&component_tree, &circuit.witness)?;
     let wtns_data = witness(witness_signals, circuit.field.prime)?;
 
     w.write_all(&wtns_data)?;
@@ -525,7 +525,7 @@ pub fn calculate_witness_vm2<T: FieldOps>(
 
 fn witness_signals<T: FieldOps>(
     component_tree: &vm2::Component<T>,
-    witness_signals: &[usize]) -> Vec<T> {
+    witness_signals: &[usize]) -> Result<Vec<T>, Box<dyn std::error::Error>> {
 
     let start = std::time::Instant::now();
     let signals_num = component_tree.total_signals_len() + 1;
@@ -535,14 +535,18 @@ fn witness_signals<T: FieldOps>(
 
     let mut witness: Vec<T> = Vec::with_capacity(witness_signals.len());
     for idx in witness_signals {
-        witness.push(signals[*idx].unwrap_or_else(T::zero));
+        let signal = signals.get(*idx)
+            .ok_or_else(|| format!(
+                "witness index {} outside signal range {}",
+                idx, signals.len()))?;
+        witness.push(signal.unwrap_or_else(T::zero));
     }
 
     println!(
         "Witness signals gathered in {:?}. Total signals: {}, witness signals: {}.",
         start.elapsed(), signals_num, witness.len());
 
-    witness
+    Ok(witness)
 }
 fn witness<T: FieldOps>(
     witness_signals: Vec<T>,
@@ -583,6 +587,44 @@ mod tests {
     use ruint::uint;
     use crate::proto::InputNode;
     use crate::field::{Field, U254, bn254_prime};
+    use crate::vm2::{Circuit, Function, OpCode, Template};
+
+    fn minimal_vm2_circuit(code: Vec<u8>, witness: Vec<usize>) -> Circuit<U254> {
+        Circuit {
+            main_template_id: 0,
+            templates: vec![Template {
+                name: "Main".to_string(),
+                code,
+                signals_num: 1,
+                number_of_inputs: 0,
+                components: vec![],
+                inputs: vec![],
+                outputs: vec![],
+                ff_variable_names: vec![],
+                i64_variable_names: vec![],
+            }],
+            functions: vec![],
+            function_registry: HashMap::new(),
+            field: Field::new(bn254_prime),
+            witness,
+            signals_num: 1,
+            input_infos: vec![],
+            types: vec![],
+        }
+    }
+
+    fn push_i64(code: &mut Vec<u8>, value: i64) {
+        code.push(OpCode::PushI64 as u8);
+        code.extend(value.to_le_bytes());
+    }
+
+    fn calc_vm2_err(circuit: &Circuit<U254>) -> String {
+        let mut artifact = Vec::new();
+        crate::storage::serialize_witnesscalc_vm2(&mut artifact, circuit).unwrap();
+        super::calc_witness("{}", &artifact)
+            .unwrap_err()
+            .to_string()
+    }
 
     #[test]
     fn test_ok() {
@@ -696,6 +738,90 @@ mod tests {
         let err = calc_vm2_err(&circuit);
         assert!(err.contains("Invalid type ID: 7"),
             "expected the nested bus-type guard to reject it, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_truncated_vm2_immediate() {
+        let circuit = minimal_vm2_circuit(vec![OpCode::PushI64 as u8], vec![]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Code range is out of bounds"),
+            "expected truncated immediate to be rejected, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_jump_target_out_of_range() {
+        let mut code = vec![OpCode::Jump as u8];
+        code.extend(100_i32.to_le_bytes());
+        let circuit = minimal_vm2_circuit(code, vec![]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Code index is out of bounds"),
+            "expected out-of-range jump target to be rejected, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_component_index_out_of_range() {
+        let mut code = Vec::new();
+        push_i64(&mut code, 7);
+        push_i64(&mut code, 0);
+        code.push(OpCode::LoadCmpSignal as u8);
+
+        let circuit = minimal_vm2_circuit(code, vec![]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Component index 7 is out of bounds"),
+            "expected component-index guard to reject it, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_stack_underflow() {
+        let circuit = minimal_vm2_circuit(vec![OpCode::LoadSignal as u8], vec![]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Stack is empty"),
+            "expected stack underflow to be rejected, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_memory_load_out_of_range() {
+        let mut code = Vec::new();
+        push_i64(&mut code, 0);
+        code.push(OpCode::FfLoad as u8);
+
+        let circuit = minimal_vm2_circuit(code, vec![]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Memory address is out of bounds"),
+            "expected memory bounds guard to reject it, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_mreturn_memory_out_of_range() {
+        let mut function_code = Vec::new();
+        push_i64(&mut function_code, 0);
+        push_i64(&mut function_code, 0);
+        push_i64(&mut function_code, 1);
+        function_code.push(OpCode::FfMReturn as u8);
+
+        let mut code = vec![OpCode::FfMCall as u8];
+        code.extend(0_u32.to_le_bytes());
+        code.push(0);
+
+        let mut circuit = minimal_vm2_circuit(code, vec![]);
+        circuit.functions.push(Function {
+            name: "return_memory".to_string(),
+            code: function_code,
+            ff_variable_names: vec![],
+            i64_variable_names: vec![],
+        });
+
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("Memory address is out of bounds"),
+            "expected FfMReturn memory guard to reject it, got: {err}");
+    }
+
+    #[test]
+    fn calc_witness_rejects_vm2_witness_index_out_of_range() {
+        let circuit = minimal_vm2_circuit(vec![], vec![3]);
+        let err = calc_vm2_err(&circuit);
+        assert!(err.contains("witness index"));
+        assert!(err.contains("outside signal range"));
     }
 
     #[test]
