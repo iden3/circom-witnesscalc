@@ -630,8 +630,10 @@ fn witness<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::env;
     use std::ffi::{CStr, CString, c_void};
     use std::ptr;
+    use std::process::Command;
     use prost::Message;
     use ruint::aliases::U256;
     use ruint::uint;
@@ -729,6 +731,53 @@ mod tests {
         unsafe {
             super::gw_free_wtns_data(ptr::null_mut());
         }
+    }
+
+    #[test]
+    fn c_example_compiles_against_public_header() {
+        let cc = env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let mut cc_parts = cc.split_whitespace();
+        let compiler = cc_parts.next().unwrap_or("cc");
+        let compiler_args: Vec<&str> = cc_parts.collect();
+
+        match Command::new(compiler).args(&compiler_args).arg("--version").output() {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                println!("skipping C example compile smoke test: `{}` not found", cc);
+                return;
+            }
+            Err(err) => panic!("failed to probe C compiler `{}`: {}", cc, err),
+        }
+
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let object_file = tempfile::Builder::new()
+            .suffix(".o")
+            .tempfile()
+            .expect("failed to create temporary object file");
+
+        // Compile-only coverage keeps this focused on the public header/example
+        // C surface; Rust FFI tests exercise the exported symbol itself.
+        let output = Command::new(compiler)
+            .args(&compiler_args)
+            .arg("-std=c11")
+            .arg("-Wall")
+            .arg("-Wextra")
+            .arg("-Werror")
+            .arg("-I")
+            .arg(manifest_dir.join("include"))
+            .arg("-c")
+            .arg(manifest_dir.join("examples/calc_witness.c"))
+            .arg("-o")
+            .arg(object_file.path())
+            .output()
+            .expect("failed to compile C example");
+
+        assert!(
+            output.status.success(),
+            "failed to compile C example:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
     }
 
     #[test]
