@@ -112,12 +112,13 @@ main(int argc, char *argv[]) {
 	fprintf(stderr, "Error code: %i\n", status.code);
 	if (status.error_msg != NULL) {
 	  printf("Error msg: %s\n", status.error_msg);
-	  free(status.error_msg);
 	}
+	gw_free_status(&status);
 	return 1;
   }
   gw_free_status(&status);
 
 
   save_binary_file(witness_path, wtns_data, wtns_len);
+  gw_free_wtns_data(wtns_data);
 }

@@ -92,6 +92,19 @@ pub unsafe extern "C" fn gw_calc_witness(
     }
 }
 
+/// # Safety
+///
+/// `wtns_data` must be NULL or a pointer returned by gw_calc_witness that has
+/// not already been freed.
+#[no_mangle]
+pub unsafe extern "C" fn gw_free_wtns_data(wtns_data: *mut c_void) {
+    if !wtns_data.is_null() {
+        unsafe {
+            libc::free(wtns_data);
+        }
+    }
+}
+
 unsafe fn gw_calc_witness_inner(
     inputs: *const c_char,
     graph_data: *const c_void, graph_data_len: usize,
@@ -707,7 +720,14 @@ mod tests {
         };
         assert!(witness.starts_with(b"wtns"));
         unsafe {
-            libc::free(wtns_data);
+            super::gw_free_wtns_data(wtns_data);
+        }
+    }
+
+    #[test]
+    fn ffi_free_wtns_data_accepts_null() {
+        unsafe {
+            super::gw_free_wtns_data(ptr::null_mut());
         }
     }
 
