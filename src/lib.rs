@@ -19,7 +19,7 @@ use std::slice::from_raw_parts;
 use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::{evaluate, Nodes, NodesInterface, NodesStorage, VecNodes};
+use crate::graph::{evaluate, evaluate_bn254, Nodes, NodesInterface, NodesStorage, VecNodes};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
@@ -190,8 +190,13 @@ fn calc_witness_graph(
     println!("Inputs populated in {:?}", start.elapsed());
 
     if let Some(nodes) = nodes.as_any().downcast_ref::<Nodes<U254, VecNodes>>() {
-        let result = calc_witness_typed(
-            nodes, inputs, &signals, &input_info)?;
+        let inputs = prepare_inputs(nodes, inputs, &input_info)?;
+        let is_bn254 = nodes.ff.prime == bn254_prime;
+        let result = if is_bn254 {
+            evaluate_bn254(&nodes.ff, &nodes.nodes, &inputs, &signals, &nodes.constants)
+        } else {
+            evaluate(&nodes.ff, &nodes.nodes, &inputs, &signals, &nodes.constants)
+        };
         let vec_witness: Vec<FieldElement<32>> = result
             .iter()
             .map(|a| TryInto::<[u8; 32]>::try_into(a.as_le_slice()).unwrap().into())
@@ -214,22 +219,25 @@ fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
     nodes: &Nodes<T, NS>, inputs: &str, signals: &[usize],
     inputs_info: &InputInfo) -> Result<Vec<T>, Box<dyn std::error::Error>> {
 
-    let inputs = match inputs_info {
+    let inputs = prepare_inputs(nodes, inputs, inputs_info)?;
+    Ok(evaluate(&nodes.ff, &nodes.nodes, &inputs, signals, &nodes.constants))
+}
+
+/// Decode the JSON inputs and lay them out into the flat signal vector the evaluators expect.
+fn prepare_inputs<T: FieldOps, NS: NodesStorage>(
+    nodes: &Nodes<T, NS>, inputs: &str,
+    inputs_info: &InputInfo) -> Result<Vec<T>, Box<dyn std::error::Error>> {
+
+    match inputs_info {
         InputInfo::V1(inputs_mapping) => {
             // flatten inputs as flat arrays
-            let inputs = deserialize_and_flatten_inputs(
-                inputs.as_bytes(), &nodes.ff)?;
-            init_inputs_from_inputs_mapping(&inputs, inputs_mapping)?
+            let inputs = deserialize_and_flatten_inputs(inputs.as_bytes(), &nodes.ff)?;
+            init_inputs_from_inputs_mapping(&inputs, inputs_mapping)
         },
         InputInfo::V2{input_info, types} => {
-            init_inputs_from_v2(inputs, &nodes.ff, input_info, types)?
+            init_inputs_from_v2(inputs, &nodes.ff, input_info, types)
         }
-    };
-
-    let result = evaluate(
-        &nodes.ff, &nodes.nodes, &inputs, signals, &nodes.constants);
-
-    Ok(result)
+    }
 }
 
 fn init_inputs_from_inputs_mapping<T: FieldOps>(
