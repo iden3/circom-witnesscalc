@@ -7,15 +7,14 @@ pub mod graph;
 pub mod storage;
 pub mod vm;
 pub mod vm2;
+mod ffi;
 mod vm2_setup;
 pub mod ast;
 
 pub mod parser;
 
 use std::collections::HashMap;
-use std::ffi::{c_char, c_int, c_void, CStr};
 use std::io::Cursor;
-use std::slice::from_raw_parts;
 use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
@@ -44,90 +43,7 @@ pub mod proto {
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 // include!("bindings.rs");
 
-fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
-    if !status.is_null() {
-        let bs = error_msg.as_bytes();
-        unsafe {
-            (*status).code = code;
-            (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
-            libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
-            *((*status).error_msg.add(bs.len())) = 0;
-        }
-    }
-}
-
-/// # Safety
-/// 
-/// This function is unsafe because it dereferences raw pointers and can cause
-/// undefined behavior if misused.
-#[no_mangle]
-pub unsafe extern "C" fn gw_calc_witness(
-    inputs: *const c_char,
-    graph_data: *const c_void, graph_data_len: usize,
-    wtns_data: *mut *mut c_void, wtns_len: *mut usize,
-    status: *mut gw_status_t) -> c_int {
-
-    if inputs.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "inputs is null");
-        return 1;
-    }
-
-    if graph_data.is_null() {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data is null");
-        return 1;
-    }
-
-    if graph_data_len == 0 {
-        prepare_status(status, GW_ERROR_CODE_ERROR, "graph_data_len is 0");
-        return 1;
-    }
-
-    let graph_data_r: &[u8];
-    unsafe {
-        graph_data_r = from_raw_parts(graph_data as *const u8, graph_data_len);
-    }
-
-
-    let inputs_str: &str;
-    unsafe {
-        let c = CStr::from_ptr(inputs);
-        match c.to_str() {
-            Ok(x) => {
-                inputs_str = x;
-            }
-            Err(e) => {
-                prepare_status(
-                    status, GW_ERROR_CODE_ERROR,
-                    format!(
-                        "Failed to parse inputs as UTF-8 string: {}",
-                        e).as_str());
-                return 1;
-            }
-        }
-    }
-
-    let witness_data = match calc_witness(inputs_str, graph_data_r) {
-        Ok(witness) => witness,
-        Err(e) => {
-            prepare_status(status, GW_ERROR_CODE_ERROR, format!("Failed to calculate witness: {:?}", e).as_str());
-            return 1;
-        }
-    };
-
-    unsafe {
-        *wtns_len = witness_data.len();
-        *wtns_data = libc::malloc(witness_data.len());
-        if (*wtns_data).is_null() {
-            prepare_status(status, GW_ERROR_CODE_ERROR, "Failed to allocate memory for wtns_data");
-            return 1;
-        }
-        libc::memcpy(*wtns_data, witness_data.as_ptr() as *const c_void, witness_data.len());
-    }
-
-    prepare_status(status, GW_ERROR_CODE_ERROR, "test error");
-
-    0
-}
+pub use ffi::{gw_calc_witness, gw_free_wtns_data};
 
 // create a wtns file bytes from witness (array of field elements)
 pub fn wtns_from_u256_witness(witness: Vec<U256>) -> Vec<u8> {

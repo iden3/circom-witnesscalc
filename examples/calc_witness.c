@@ -11,7 +11,13 @@ void read_json_file(const char* file_path, char** data) {
     }
 
     fseek(file, 0, SEEK_END);
-    long length = ftell(file);
+    long file_length = ftell(file);
+    if (file_length < 0) {
+        perror("Failed to determine inputs JSON file size");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+    size_t length = (size_t)file_length;
     fseek(file, 0, SEEK_SET);
 
     *data = malloc(length + 1);
@@ -31,7 +37,7 @@ void read_json_file(const char* file_path, char** data) {
     (*data)[length] = '\0';
 
 	size_t sz2 = strlen(*data);
-	if (sz != length) {
+	if (sz2 != length) {
 	  fprintf(stderr, "Something is wrong with inputs JSON data. Is it a correct JSON?");
 	  exit(EXIT_FAILURE);
 	}
@@ -45,7 +51,13 @@ void read_binary_file(const char* file_path, void** binary_data, size_t* binary_
     }
 
     fseek(file, 0, SEEK_END);
-    long length = ftell(file);
+    long file_length = ftell(file);
+    if (file_length < 0) {
+        perror("Failed to determine binary file size");
+        fclose(file);
+        exit(EXIT_FAILURE);
+    }
+    size_t length = (size_t)file_length;
     fseek(file, 0, SEEK_SET);
 
     void *data = malloc(length);
@@ -106,18 +118,23 @@ main(int argc, char *argv[]) {
   void *wtns_data = NULL;
   size_t wtns_len = 0;
  
-  gw_status_t status;
+  gw_status_t status = { .code = OK, .error_msg = NULL };
   int r = gw_calc_witness(inputs_json_data, graph_data, graph_length, &wtns_data, &wtns_len, &status);
   if (r != 0) {
 	fprintf(stderr, "Error code: %i\n", status.code);
 	if (status.error_msg != NULL) {
 	  printf("Error msg: %s\n", status.error_msg);
-	  free(status.error_msg);
 	}
+	gw_free_status(&status);
+	free(inputs_json_data);
+	free(graph_data);
 	return 1;
   }
   gw_free_status(&status);
 
+  free(inputs_json_data);
+  free(graph_data);
 
   save_binary_file(witness_path, wtns_data, wtns_len);
+  gw_free_wtns_data(wtns_data);
 }
