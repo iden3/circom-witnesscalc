@@ -58,11 +58,13 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
             if error_msg_ptr.is_null() {
                 return;
             }
-            libc::memcpy(
-                error_msg_ptr as *mut c_void,
-                bs.as_ptr() as *mut c_void,
-                bs.len(),
-            );
+            if !bs.is_empty() {
+                libc::memcpy(
+                    error_msg_ptr as *mut c_void,
+                    bs.as_ptr() as *const c_void,
+                    bs.len(),
+                );
+            }
             *(error_msg_ptr.add(bs.len())) = 0;
             (*status).error_msg = error_msg_ptr;
         }
@@ -533,7 +535,7 @@ fn witness<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::ffi::{c_void, CString};
+    use std::ffi::{c_void, CStr, CString};
     use std::ptr;
     use std::panic;
     use prost::Message;
@@ -581,6 +583,21 @@ mod tests {
         super::gw_status_t {
             code,
             error_msg: ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn prepare_status_handles_empty_error_message() {
+        let mut status = empty_status(super::GW_ERROR_CODE_OK);
+
+        super::prepare_status(&mut status, super::GW_ERROR_CODE_ERROR, "");
+
+        assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
+        assert!(!status.error_msg.is_null());
+        let error_msg = unsafe { CStr::from_ptr(status.error_msg) };
+        assert_eq!(error_msg.to_bytes(), b"");
+        unsafe {
+            libc::free(status.error_msg as *mut c_void);
         }
     }
 
