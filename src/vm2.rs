@@ -8,6 +8,15 @@ use bitvec::order::Lsb0;
 use bitvec::vec::BitVec;
 use crate::field::{Field, FieldOperations, FieldOps};
 
+mod bytecode;
+
+use bytecode::{
+    advance_ip, checked_jump_target, checked_memory_index, checked_signal_index,
+    checked_stack_index, i64_to_usize, read_byte_advance, read_i32_advance,
+    read_i64_advance, read_instruction, read_range_advance, read_u32_le,
+    read_usize32, read_usize_advance,
+};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct InputInfo {
     pub name: String,
@@ -649,144 +658,6 @@ pub struct Function {
     // Variable name mappings for debugging
     pub ff_variable_names: Vec<String>,
     pub i64_variable_names: Vec<String>,
-}
-
-fn read_byte(code: &[u8], ip: usize) -> Result<u8, RuntimeError> {
-    code.get(ip)
-        .copied()
-        .ok_or(RuntimeError::CodeIndexOutOfBounds)
-}
-
-fn read_range(code: &[u8], start: usize, len: usize) -> Result<&[u8], RuntimeError> {
-    let end = start
-        .checked_add(len)
-        .ok_or(RuntimeError::CodeRangeOutOfBounds {
-            start,
-            len,
-            code_len: code.len(),
-        })?;
-    code.get(start..end)
-        .ok_or(RuntimeError::CodeRangeOutOfBounds {
-            start,
-            len,
-            code_len: code.len(),
-        })
-}
-
-fn advance_ip(ip: usize, len: usize) -> Result<usize, RuntimeError> {
-    ip.checked_add(len)
-        .ok_or(RuntimeError::CodeIndexOutOfBounds)
-}
-
-fn read_byte_advance(code: &[u8], ip: &mut usize) -> Result<u8, RuntimeError> {
-    let byte = read_byte(code, *ip)?;
-    *ip = advance_ip(*ip, 1)?;
-    Ok(byte)
-}
-
-fn read_u32_le(code: &[u8], start: usize) -> Result<u32, RuntimeError> {
-    let bytes = read_range(code, start, size_of::<u32>())?;
-    Ok(u32::from_le_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| RuntimeError::CodeIndexOutOfBounds)?,
-    ))
-}
-
-fn read_i32_le(code: &[u8], start: usize) -> Result<i32, RuntimeError> {
-    let bytes = read_range(code, start, size_of::<i32>())?;
-    Ok(i32::from_le_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| RuntimeError::CodeIndexOutOfBounds)?,
-    ))
-}
-
-fn read_i64_le(code: &[u8], start: usize) -> Result<i64, RuntimeError> {
-    let bytes = read_range(code, start, size_of::<i64>())?;
-    Ok(i64::from_le_bytes(
-        bytes
-            .try_into()
-            .map_err(|_| RuntimeError::CodeIndexOutOfBounds)?,
-    ))
-}
-
-fn read_i32_advance(code: &[u8], ip: &mut usize) -> Result<i32, RuntimeError> {
-    let value = read_i32_le(code, *ip)?;
-    *ip = advance_ip(*ip, size_of::<i32>())?;
-    Ok(value)
-}
-
-fn read_i64_advance(code: &[u8], ip: &mut usize) -> Result<i64, RuntimeError> {
-    let value = read_i64_le(code, *ip)?;
-    *ip = advance_ip(*ip, size_of::<i64>())?;
-    Ok(value)
-}
-
-fn read_range_advance<'a>(
-    code: &'a [u8],
-    ip: &mut usize,
-    len: usize,
-) -> Result<&'a [u8], RuntimeError> {
-    let bytes = read_range(code, *ip, len)?;
-    *ip = advance_ip(*ip, len)?;
-    Ok(bytes)
-}
-
-fn i64_to_usize(value: i64) -> Result<usize, RuntimeError> {
-    value
-        .try_into()
-        .map_err(|_| RuntimeError::I32ToUsizeConversion)
-}
-
-fn read_usize_advance(code: &[u8], ip: &mut usize) -> Result<usize, RuntimeError> {
-    i64_to_usize(read_i64_advance(code, ip)?)
-}
-
-fn checked_jump_target(
-    ip_after_operand: usize,
-    offset: i32,
-    code_len: usize,
-) -> Result<usize, RuntimeError> {
-    let target = if offset < 0 {
-        ip_after_operand
-            .checked_sub(offset.unsigned_abs() as usize)
-            .ok_or(RuntimeError::CodeIndexOutOfBounds)?
-    } else {
-        ip_after_operand
-            .checked_add(offset as usize)
-            .ok_or(RuntimeError::CodeIndexOutOfBounds)?
-    };
-    if target <= code_len {
-        Ok(target)
-    } else {
-        Err(RuntimeError::CodeIndexOutOfBounds)
-    }
-}
-
-fn checked_stack_index(base: usize, offset: usize) -> Result<usize, RuntimeError> {
-    base.checked_add(offset).ok_or(RuntimeError::StackOverflow)
-}
-
-fn checked_memory_index(base: usize, offset: usize) -> Result<usize, RuntimeError> {
-    base.checked_add(offset)
-        .ok_or(RuntimeError::MemoryAddressOutOfBounds)
-}
-
-fn checked_signal_index(base: usize, offset: usize) -> Result<usize, RuntimeError> {
-    base.checked_add(offset)
-        .ok_or(RuntimeError::SignalIndexOutOfBounds)
-}
-
-fn read_instruction(code: &[u8], ip: usize) -> Result<OpCode, RuntimeError> {
-    let byte = read_byte(code, ip)?;
-    OpCode::try_from(byte)
-}
-
-// read 4 bytes from the code and return usize and the next instruction pointer
-fn read_usize32(code: &[u8], ip: usize) -> Result<(usize, usize), RuntimeError> {
-    let v = read_u32_le(code, ip)? as usize;
-    Ok((v, advance_ip(ip, size_of::<u32>())?))
 }
 
 #[derive(Debug, thiserror::Error)]
