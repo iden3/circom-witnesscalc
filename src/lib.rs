@@ -53,9 +53,27 @@ fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str
         let bs = error_msg.as_bytes();
         unsafe {
             (*status).code = code;
-            (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
-            libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
-            *((*status).error_msg.add(bs.len())) = 0;
+            (*status).error_msg = std::ptr::null_mut();
+            let error_msg_ptr = libc::malloc(bs.len() + 1) as *mut c_char;
+            if error_msg_ptr.is_null() {
+                return;
+            }
+            libc::memcpy(
+                error_msg_ptr as *mut c_void,
+                bs.as_ptr() as *mut c_void,
+                bs.len(),
+            );
+            *(error_msg_ptr.add(bs.len())) = 0;
+            (*status).error_msg = error_msg_ptr;
+        }
+    }
+}
+
+fn prepare_success_status(status: *mut gw_status_t) {
+    if !status.is_null() {
+        unsafe {
+            (*status).code = GW_ERROR_CODE_OK;
+            (*status).error_msg = std::ptr::null_mut();
         }
     }
 }
@@ -128,7 +146,7 @@ pub unsafe extern "C" fn gw_calc_witness(
         libc::memcpy(*wtns_data, witness_data.as_ptr() as *const c_void, witness_data.len());
     }
 
-    prepare_status(status, GW_ERROR_CODE_ERROR, "test error");
+    prepare_success_status(status);
 
     0
 }
@@ -515,6 +533,8 @@ fn witness<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::{c_void, CString};
+    use std::ptr;
     use std::panic;
     use prost::Message;
     use ruint::aliases::U256;
@@ -555,6 +575,48 @@ mod tests {
         };
         let v = i.encode_to_vec();
         println!("{:?}", v.len());
+    }
+
+    fn empty_status(code: super::GW_ERROR_CODE) -> super::gw_status_t {
+        super::gw_status_t {
+            code,
+            error_msg: ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn ffi_success_sets_ok_status_and_writes_witness() {
+        let inputs = CString::new(include_str!(
+            "../tests/vm2_setup/data/test_init_signals__inputs.json"
+        ))
+        .unwrap();
+        let graph_data = include_bytes!("../tests/vm2_setup/data/test_init_signals__bc2.wcd");
+        let mut wtns_data = ptr::null_mut();
+        let mut wtns_len = 0;
+        let mut status = empty_status(super::GW_ERROR_CODE_ERROR);
+
+        let result = unsafe {
+            super::gw_calc_witness(
+                inputs.as_ptr(),
+                graph_data.as_ptr() as *const c_void,
+                graph_data.len(),
+                &mut wtns_data,
+                &mut wtns_len,
+                &mut status,
+            )
+        };
+
+        assert_eq!(result, 0);
+        assert_eq!(status.code, super::GW_ERROR_CODE_OK);
+        assert!(status.error_msg.is_null());
+        assert!(!wtns_data.is_null());
+        assert!(wtns_len > 0);
+
+        let witness = unsafe { std::slice::from_raw_parts(wtns_data as *const u8, wtns_len) };
+        assert!(witness.starts_with(b"wtns"));
+        unsafe {
+            libc::free(wtns_data);
+        }
     }
 
     #[test]
