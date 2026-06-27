@@ -34,15 +34,14 @@ use crate::vm2_setup::{build_component_tree, init_signals};
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
 
 pub mod proto {
-    include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.rs"));
+    include!("proto/circom_witnesscalc.proto.rs");
 
     pub mod vm {
-        include!(concat!(env!("OUT_DIR"), "/circom_witnesscalc.proto.vm.rs"));
+        include!("proto/circom_witnesscalc.proto.vm.rs");
     }
 }
 
-include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
-// include!("bindings.rs");
+include!("bindings.rs");
 
 fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
     if !status.is_null() {
