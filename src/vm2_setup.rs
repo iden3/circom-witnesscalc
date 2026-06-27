@@ -3,6 +3,10 @@ use std::error::Error;
 use std::sync::{Arc, RwLock};
 use crate::field::{FieldOperations, FieldOps};
 use crate::vm2::{Component, InputInfo, InputInfoSliceExt, Template, Type, TypeFieldKind};
+mod input_diagnostics;
+use input_diagnostics::{missing_input_signal_message, unknown_input_signal_message};
+#[cfg(test)]
+use input_diagnostics::signal_idx_to_input_path;
 
 /// Initialize signals array with input values from JSON
 pub fn init_signals<T: FieldOps, F>(
@@ -28,8 +32,11 @@ where
 
     for (path, value) in input_signals.iter() {
         let signal_idx = path_to_signal_idx(path, input_infos, types)
-            .ok_or_else(|| format!("signal {} is not found in input infos", path))?;
+            .filter(|idx| *idx >= first_offset && *idx < first_offset + total_inputs)
+            .ok_or_else(|| unknown_input_signal_message(path, input_infos))?;
 
+        // The filter above bounds signal_idx to the input window, so local_idx
+        // is always a valid index into signals_set.
         let local_idx = signal_idx - first_offset;
         if signals_set[local_idx] {
             return Err(format!("duplicate signal at path {}", path).into());
@@ -40,7 +47,10 @@ where
 
     // Check if any input signals were not provided
     if let Some(missing_idx) = signals_set.iter().position(|&s| !s) {
-        return Err(format!("missing input signal at offset {}", first_offset + missing_idx).into());
+        return Err(missing_input_signal_message(
+            first_offset + missing_idx,
+            input_infos,
+            types).into());
     }
 
     Ok(())
@@ -51,7 +61,9 @@ fn path_to_signal_idx(path: &str, input_infos: &[InputInfo], types: &[Type]) -> 
     // Handle root array: "[5]" -> first_offset + 5
     if path.starts_with('[') {
         if let Some(idx) = parse_root_array_index(path) {
-            return Some(input_infos.first()?.offset + idx);
+            // checked_add so an out-of-range index from a hostile JSON key is
+            // rejected uniformly rather than wrapping (release) or panicking (debug).
+            return input_infos.first()?.offset.checked_add(idx);
         }
     }
 
@@ -184,6 +196,14 @@ fn parse_array_indices<'a>(suffix: &'a str, dimensions: &[usize]) -> Option<(usi
     }
 
     if indices.len() == dimensions.len() {
+        if indices
+            .iter()
+            .zip(dimensions.iter())
+            .any(|(&idx, &dim)| idx >= dim)
+        {
+            return None;
+        }
+
         // Multi-dimensional indexing
         let flat_idx = indices.iter()
             .zip(dimensions.iter())
@@ -438,7 +458,8 @@ where
                     .map_err(|e| -> Box<dyn Error> {e})?
             } else if n.is_i64() {
                 let n = n.as_i64().unwrap();
-                ff.parse_str(&n.to_string())?
+                ff.parse_str(&n.to_string())
+                    .map_err(|e| format!("invalid field value at {}: {}", prefix, e))?
             } else {
                 return Err(format!("invalid number at path {}: {}", prefix, n)
                     .into());
@@ -452,7 +473,9 @@ where
             if prefix.is_empty() {
                 return Err("string value cannot be at the root".into());
             }
-            records.insert(prefix.to_string(), ff.parse_str(s)?);
+            let value = ff.parse_str(s)
+                .map_err(|e| format!("invalid field value at {}: {}", prefix, e))?;
+            records.insert(prefix.to_string(), value);
         },
         serde_json::Value::Array(vs) => {
             for (i, v) in vs.iter().enumerate() {
@@ -899,6 +922,184 @@ mod tests {
         want.insert("v.v[1].end.x".to_string(), U254::from_str("10").unwrap());
         want.insert("v.v[1].end.y".to_string(), U254::from_str("11").unwrap());
         assert_eq!(want, result);
+
+        let i = r#"{ "input": ["1", "2", "not-a-field"] }"#;
+        let result = parse_signals_json(i.as_bytes(), &ff);
+        let binding = result.unwrap_err();
+        assert!(binding
+            .to_string()
+            .contains("invalid field value at input[2]"));
+    }
+
+    fn diagnostic_input_metadata() -> (Vec<Type>, Vec<InputInfo>) {
+        use crate::vm2::TypeField;
+
+        let types = vec![
+            Type {
+                name: "bus_0".to_string(),
+                fields: vec![
+                    TypeField {
+                        name: "x".to_string(),
+                        kind: TypeFieldKind::Ff,
+                        offset: 0,
+                        base_type_size: 1,
+                        dims: vec![2],
+                    },
+                    TypeField {
+                        name: "y".to_string(),
+                        kind: TypeFieldKind::Ff,
+                        offset: 2,
+                        base_type_size: 1,
+                        dims: vec![],
+                    },
+                ],
+            },
+            Type {
+                name: "bus_1".to_string(),
+                fields: vec![
+                    TypeField {
+                        name: "start".to_string(),
+                        kind: TypeFieldKind::Bus(0),
+                        offset: 0,
+                        base_type_size: 3,
+                        dims: vec![2],
+                    },
+                    TypeField {
+                        name: "end".to_string(),
+                        kind: TypeFieldKind::Bus(0),
+                        offset: 6,
+                        base_type_size: 3,
+                        dims: vec![],
+                    },
+                ],
+            },
+        ];
+
+        let input_infos = vec![
+            InputInfo {
+                name: "a".to_string(),
+                offset: 1,
+                lengths: vec![2, 3],
+                type_id: None,
+            },
+            InputInfo {
+                name: "b".to_string(),
+                offset: 7,
+                lengths: vec![],
+                type_id: None,
+            },
+            InputInfo {
+                name: "c".to_string(),
+                offset: 8,
+                lengths: vec![],
+                type_id: Some("bus_1".to_string()),
+            },
+        ];
+
+        (types, input_infos)
+    }
+
+    #[test]
+    fn test_init_signals_diagnostic_errors() {
+        let ff = Field::new(bn254_prime);
+        let (types, input_infos) = diagnostic_input_metadata();
+
+        let mut component = Component::new(0, 0, vec![], 16, 17);
+        let inputs = std::io::Cursor::new(r#"{ "a": { "bad": 1 } }"#.as_bytes());
+        let err = init_signals(inputs, &ff, &types, &input_infos, &mut component)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown input signal a.bad"));
+        assert!(err.contains("expected one of: a, b, c"));
+
+        let mut component = Component::new(0, 0, vec![], 16, 17);
+        let inputs = std::io::Cursor::new(
+            r#"{ "a": [1, 2, 3, 4, 5, 6], "b": 7 }"#.as_bytes());
+        let err = init_signals(inputs, &ff, &types, &input_infos, &mut component)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("missing input signal at path c.start[0].x[0]"));
+        assert!(err.contains("offset 8"));
+        assert_ne!(err, "missing input signal at offset 8");
+    }
+
+    #[test]
+    fn test_unknown_input_diagnostic_sorts_expected_names() {
+        let scalar = |name: &str, offset: usize| InputInfo {
+            name: name.to_string(),
+            offset,
+            lengths: vec![],
+            type_id: None,
+        };
+        let ff = Field::new(bn254_prime);
+        let input_infos = vec![scalar("c", 3), scalar("a", 1), scalar("b", 2)];
+        let mut component = Component::new(0, 0, vec![], 3, 4);
+        let inputs = std::io::Cursor::new(r#"{ "z": 1 }"#.as_bytes());
+        let err = init_signals(inputs, &ff, &[], &input_infos, &mut component)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("unknown input signal z"));
+        assert!(err.contains("expected one of: a, b, c"));
+    }
+
+    #[test]
+    fn test_signal_idx_to_input_path() {
+        let (types, input_infos) = diagnostic_input_metadata();
+
+        assert_eq!(
+            signal_idx_to_input_path(1, &input_infos, &types),
+            Some("a[0][0]".to_string()));
+        assert_eq!(
+            signal_idx_to_input_path(6, &input_infos, &types),
+            Some("a[1][2]".to_string()));
+        assert_eq!(
+            signal_idx_to_input_path(7, &input_infos, &types),
+            Some("b".to_string()));
+        assert_eq!(
+            signal_idx_to_input_path(8, &input_infos, &types),
+            Some("c.start[0].x[0]".to_string()));
+        assert_eq!(
+            signal_idx_to_input_path(16, &input_infos, &types),
+            Some("c.end.y".to_string()));
+    }
+
+    #[test]
+    fn test_missing_input_diagnostic_handles_invalid_nested_bus_metadata() {
+        use crate::vm2::TypeField;
+
+        let ff = Field::new(bn254_prime);
+        let types = vec![
+            Type {
+                name: "bad_bus".to_string(),
+                fields: vec![
+                    TypeField {
+                        name: "nested".to_string(),
+                        kind: TypeFieldKind::Bus(99),
+                        offset: 0,
+                        base_type_size: 1,
+                        dims: vec![],
+                    },
+                ],
+            },
+        ];
+        let input_infos = vec![
+            InputInfo {
+                name: "c".to_string(),
+                offset: 1,
+                lengths: vec![],
+                type_id: Some("bad_bus".to_string()),
+            },
+        ];
+
+        let mut component = Component::new(0, 0, vec![], 1, 2);
+        let inputs = std::io::Cursor::new(r#"{}"#.as_bytes());
+        let err = init_signals(inputs, &ff, &types, &input_infos, &mut component)
+            .unwrap_err()
+            .to_string();
+
+        assert!(err.contains("missing input signal at offset 1"));
+        assert!(err.contains("expected one of: c"));
     }
 
     #[test]
@@ -941,6 +1142,8 @@ mod tests {
         // Also test flat indexing
         assert_eq!(path_to_signal_idx("a[0]", &input_infos, &types), Some(7));
         assert_eq!(path_to_signal_idx("a[5]", &input_infos, &types), Some(12));
+        assert_eq!(path_to_signal_idx("a[0][3]", &input_infos, &types), None);
+        assert_eq!(path_to_signal_idx("a[2][0]", &input_infos, &types), None);
 
         // Test "b": Ff[3][2] at offset 13
         assert_eq!(path_to_signal_idx("b[0][0]", &input_infos, &types), Some(13));
@@ -955,6 +1158,7 @@ mod tests {
         assert_eq!(path_to_signal_idx("c.start[1].x[0]", &input_infos, &types), Some(22));
         assert_eq!(path_to_signal_idx("c.end.x[0]", &input_infos, &types), Some(25));
         assert_eq!(path_to_signal_idx("c.end.y", &input_infos, &types), Some(27));
+        assert_eq!(path_to_signal_idx("c.start[0].x[2]", &input_infos, &types), None);
         // Test flat indexing into bus
         assert_eq!(path_to_signal_idx("c[0]", &input_infos, &types), Some(19));
         assert_eq!(path_to_signal_idx("c[2]", &input_infos, &types), Some(21));
