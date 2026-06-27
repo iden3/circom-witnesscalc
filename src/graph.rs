@@ -973,11 +973,85 @@ pub fn optimize<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     tree_shake(nodes, outputs);
 }
 
+fn invalid_graph(msg: String) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, msg)
+}
+
+/// Verify that every decoded node references only earlier nodes, an in-range
+/// input, and an existing constant, and that every requested output exists.
+/// Graph artifacts are untrusted, so a malformed index must surface as an
+/// error here rather than an out-of-bounds panic inside [`evaluate`], whose
+/// hot loop indexes these values directly.
+pub(crate) fn validate_node_indices<NS: NodesStorage>(
+    nodes: &NS, num_inputs: usize, num_constants: usize,
+    outputs: &[usize]) -> std::io::Result<()> {
+
+    let node_count = nodes.len();
+    for i in 0..node_count {
+        let node = nodes.get(i)
+            .ok_or_else(|| invalid_graph(format!("Graph node {} is missing", i)))?;
+        match node {
+            Node::Unknown => {
+                return Err(invalid_graph(format!("Graph node {} has unknown type", i)));
+            }
+            Node::Input(idx) => {
+                if idx >= num_inputs {
+                    return Err(invalid_graph(format!(
+                        "Graph node {} reads input {} but only {} inputs exist",
+                        i, idx, num_inputs)));
+                }
+            }
+            Node::Constant(idx) => {
+                if idx >= num_constants {
+                    return Err(invalid_graph(format!(
+                        "Graph node {} reads constant {} but only {} constants exist",
+                        i, idx, num_constants)));
+                }
+            }
+            // Operands must reference earlier nodes: the graph is stored in
+            // evaluation order, so a node may only depend on those already
+            // computed (index strictly below its own position).
+            Node::UnoOp(_, a) => check_operand(i, a)?,
+            Node::Op(_, a, b) => {
+                check_operand(i, a)?;
+                check_operand(i, b)?;
+            }
+            Node::TresOp(_, a, b, c) => {
+                check_operand(i, a)?;
+                check_operand(i, b)?;
+                check_operand(i, c)?;
+            }
+        }
+    }
+
+    for &out in outputs {
+        if out >= node_count {
+            return Err(invalid_graph(format!(
+                "Graph output references node {} but only {} nodes exist",
+                out, node_count)));
+        }
+    }
+
+    Ok(())
+}
+
+fn check_operand(node: usize, operand: usize) -> std::io::Result<()> {
+    if operand >= node {
+        return Err(invalid_graph(format!(
+            "Graph node {} references operand {} at or after its own position",
+            node, operand)));
+    }
+    Ok(())
+}
+
 pub fn evaluate<T: FieldOps, F: FieldOperations<Type = T>, NS: NodesStorage>(
     ff: F, nodes: &NS, inputs: &[T], outputs: &[usize],
     constants: &[T]) -> Vec<T>
 where Vec<T>: FromIterator<<F as FieldOperations>::Type>
 {
+    // Indices are validated by validate_node_indices before evaluation; see
+    // calc_witness_typed. evaluate itself assumes that invariant and indexes
+    // inputs, constants, and prior values directly.
     // assert_valid(nodes);
 
     let start = Instant::now();
@@ -1432,6 +1506,48 @@ mod tests {
     use super::*;
     use ruint::{uint};
     use crate::field::U254;
+
+    #[test]
+    fn test_validate_node_indices_accepts_valid_graph() {
+        let mut nodes = VecNodes::new();
+        nodes.push(Node::Input(0));
+        nodes.push(Node::Op(Operation::Mul, 0, 0));
+        validate_node_indices(&nodes, 1, 0, &[1]).unwrap();
+    }
+
+    #[test]
+    fn test_validate_node_indices_rejects_out_of_range_input() {
+        let mut nodes = VecNodes::new();
+        nodes.push(Node::Input(5));
+        let err = validate_node_indices(&nodes, 1, 0, &[]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_validate_node_indices_rejects_forward_operand() {
+        let mut nodes = VecNodes::new();
+        nodes.push(Node::Input(0));
+        // Operand b references node 5, which is not below this node's position.
+        nodes.push(Node::Op(Operation::Mul, 0, 5));
+        let err = validate_node_indices(&nodes, 1, 0, &[]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_validate_node_indices_rejects_out_of_range_output() {
+        let mut nodes = VecNodes::new();
+        nodes.push(Node::Input(0));
+        let err = validate_node_indices(&nodes, 1, 0, &[7]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_validate_node_indices_rejects_unknown_node() {
+        let mut nodes = VecNodes::new();
+        nodes.push(Node::Unknown);
+        let err = validate_node_indices(&nodes, 0, 0, &[]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
 
     #[test]
     fn test_ok() {

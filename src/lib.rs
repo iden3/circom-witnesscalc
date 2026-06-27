@@ -3,6 +3,7 @@
 #![allow(non_snake_case)]
 // #[allow(dead_code)]
 pub mod field;
+mod graph_inputs;
 pub mod graph;
 pub mod storage;
 pub mod vm;
@@ -14,12 +15,12 @@ pub mod parser;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, c_int, c_void, CStr};
-use std::io::Cursor;
 use std::slice::from_raw_parts;
 use anyhow::anyhow;
 use ruint::aliases::U256;
 use ruint::ParseError;
-use crate::graph::{evaluate, Nodes, NodesInterface, NodesStorage, VecNodes};
+use crate::graph_inputs::{init_inputs_from_inputs_mapping, init_inputs_from_v2};
+use crate::graph::{evaluate, validate_node_indices, Nodes, NodesInterface, NodesStorage, VecNodes};
 use wtns_file::FieldElement;
 use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
@@ -27,8 +28,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::field::{bn254_prime, Field, FieldOperations, FieldOps, U254, U64};
 use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
 use crate::storage::{deserialize_witnesscalc_vm2_body, read_witnesscalc_vm2_header, WITNESSCALC_CVM_MAGIC, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
-use crate::vm2::{execute, Circuit, Component};
-use crate::vm2::InputInfoSliceExt;
+use crate::vm2::{execute, Circuit};
 use crate::vm2_setup::{build_component_tree, init_signals};
 
 pub type InputSignalsInfo = HashMap<String, (usize, usize)>;
@@ -44,14 +44,38 @@ pub mod proto {
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 // include!("bindings.rs");
 
+// Graph V2 input metadata is untrusted; cap the temporary component used to
+// parse inputs before Component::new performs infallible signal allocation.
+const MAX_GRAPH_V2_INPUT_SIGNALS: usize = 1 << 24;
+
 fn prepare_status(status: *mut gw_status_t, code: GW_ERROR_CODE, error_msg: &str) {
     if !status.is_null() {
         let bs = error_msg.as_bytes();
         unsafe {
             (*status).code = code;
-            (*status).error_msg = libc::malloc(bs.len()+1) as *mut c_char;
-            libc::memcpy((*status).error_msg as *mut c_void, bs.as_ptr() as *mut c_void, bs.len());
-            *((*status).error_msg.add(bs.len())) = 0;
+            (*status).error_msg = std::ptr::null_mut();
+            let error_msg_ptr = libc::malloc(bs.len() + 1) as *mut c_char;
+            if error_msg_ptr.is_null() {
+                return;
+            }
+            if !bs.is_empty() {
+                libc::memcpy(
+                    error_msg_ptr as *mut c_void,
+                    bs.as_ptr() as *const c_void,
+                    bs.len(),
+                );
+            }
+            *(error_msg_ptr.add(bs.len())) = 0;
+            (*status).error_msg = error_msg_ptr;
+        }
+    }
+}
+
+fn prepare_success_status(status: *mut gw_status_t) {
+    if !status.is_null() {
+        unsafe {
+            (*status).code = GW_ERROR_CODE_OK;
+            (*status).error_msg = std::ptr::null_mut();
         }
     }
 }
@@ -124,7 +148,7 @@ pub unsafe extern "C" fn gw_calc_witness(
         libc::memcpy(*wtns_data, witness_data.as_ptr() as *const c_void, witness_data.len());
     }
 
-    prepare_status(status, GW_ERROR_CODE_ERROR, "test error");
+    prepare_success_status(status);
 
     0
 }
@@ -181,7 +205,7 @@ fn calc_witness_graph(
 
     let start = std::time::Instant::now();
     let (nodes, signals, input_info): (Box<dyn NodesInterface>, Vec<usize>, InputInfo) =
-        deserialize_witnesscalc_graph_from_bytes(graph_data).unwrap();
+        deserialize_witnesscalc_graph_from_bytes(graph_data)?;
     println!("Graph loaded in {:?}", start.elapsed());
 
     let start = std::time::Instant::now();
@@ -226,75 +250,13 @@ fn calc_witness_typed<T: FieldOps, NS: NodesStorage>(
         }
     };
 
+    validate_node_indices(
+        &nodes.nodes, inputs.len(), nodes.constants.len(), signals)?;
+
     let result = evaluate(
         &nodes.ff, &nodes.nodes, &inputs, signals, &nodes.constants);
 
     Ok(result)
-}
-
-fn init_inputs_from_inputs_mapping<T: FieldOps>(
-    input_list: &HashMap<String, Vec<T>>,
-    inputs_info: &InputSignalsInfo) -> Result<Vec<T>, Box<dyn std::error::Error>> {
-
-    let mut inputs_len: usize = 1;
-    for (offset, len) in inputs_info.values() {
-        let idx = offset + len;
-        if idx > inputs_len {
-            inputs_len = idx;
-        }
-    }
-    let mut inputs = vec![T::zero(); inputs_len];
-    inputs[0] = T::one();
-    let mut inputs_filled = 1;
-    for (key, value) in input_list {
-        match inputs_info.get(key) {
-            None => {
-                return Err(anyhow!("Invalid input signal name for the circuit: {}", key).into());
-            }
-            Some(&(offset, len)) => {
-                if len != value.len() {
-                    return Err(anyhow!("Invalid input signal {} length: {}", key, len).into());
-                }
-                for (i, v) in value.iter().enumerate() {
-                    inputs[offset + i] = *v;
-                    inputs_filled += 1;
-                }
-            }
-        }
-    };
-
-    if inputs_filled != inputs_len {
-        return Err(anyhow!("Invalid input signal count: {}, expected {}", inputs_filled, inputs_len).into());
-    }
-
-    Ok(inputs)
-}
-
-fn init_inputs_from_v2<T: FieldOps>(
-    inputs_json: &str,
-    ff: &Field<T>,
-    input_info: &[vm2::InputInfo],
-    types: &[vm2::Type],
-) -> Result<Vec<T>, Box<dyn std::error::Error>> {
-    let inputs_size = input_info.get_total_size(types)?;
-    let min_offset = input_info.min_offset().unwrap_or(0);
-    let signals_num = min_offset + inputs_size;
-    let mut component = Component::new(0, 0, vec![], inputs_size, signals_num);
-    let inputs_cursor = Cursor::new(inputs_json.as_bytes());
-    init_signals(inputs_cursor, ff, types, input_info, &mut component)?;
-    let mut component_signals = Vec::with_capacity(signals_num);
-    component.write_all_signals(&mut component_signals);
-
-    let mut inputs = Vec::with_capacity(inputs_size + 1);
-    inputs.push(T::one());
-    inputs.extend(
-        component_signals.iter()
-            .skip(min_offset)
-            .take(inputs_size)
-            .map(|x| x.expect(
-                "[assertion] init_signals should not allow None input signals")));
-
-    Ok(inputs)
 }
 
 #[derive(Debug)]
@@ -573,11 +535,15 @@ fn witness<T: FieldOps>(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::ffi::{c_void, CStr, CString};
+    use std::ptr;
+    use std::panic;
     use prost::Message;
     use ruint::aliases::U256;
     use ruint::uint;
     use crate::proto::InputNode;
     use crate::field::{Field, U254, bn254_prime};
+    use crate::storage::WITNESSCALC_GRAPH_MAGIC_002;
 
     #[test]
     fn test_ok() {
@@ -613,6 +579,63 @@ mod tests {
         println!("{:?}", v.len());
     }
 
+    fn empty_status(code: super::GW_ERROR_CODE) -> super::gw_status_t {
+        super::gw_status_t {
+            code,
+            error_msg: ptr::null_mut(),
+        }
+    }
+
+    #[test]
+    fn prepare_status_handles_empty_error_message() {
+        let mut status = empty_status(super::GW_ERROR_CODE_OK);
+
+        super::prepare_status(&mut status, super::GW_ERROR_CODE_ERROR, "");
+
+        assert_eq!(status.code, super::GW_ERROR_CODE_ERROR);
+        assert!(!status.error_msg.is_null());
+        let error_msg = unsafe { CStr::from_ptr(status.error_msg) };
+        assert_eq!(error_msg.to_bytes(), b"");
+        unsafe {
+            libc::free(status.error_msg as *mut c_void);
+        }
+    }
+
+    #[test]
+    fn ffi_success_sets_ok_status_and_writes_witness() {
+        let inputs = CString::new(include_str!(
+            "../tests/vm2_setup/data/test_init_signals__inputs.json"
+        ))
+        .unwrap();
+        let graph_data = include_bytes!("../tests/vm2_setup/data/test_init_signals__bc2.wcd");
+        let mut wtns_data = ptr::null_mut();
+        let mut wtns_len = 0;
+        let mut status = empty_status(super::GW_ERROR_CODE_ERROR);
+
+        let result = unsafe {
+            super::gw_calc_witness(
+                inputs.as_ptr(),
+                graph_data.as_ptr() as *const c_void,
+                graph_data.len(),
+                &mut wtns_data,
+                &mut wtns_len,
+                &mut status,
+            )
+        };
+
+        assert_eq!(result, 0);
+        assert_eq!(status.code, super::GW_ERROR_CODE_OK);
+        assert!(status.error_msg.is_null());
+        assert!(!wtns_data.is_null());
+        assert!(wtns_len > 0);
+
+        let witness = unsafe { std::slice::from_raw_parts(wtns_data as *const u8, wtns_len) };
+        assert!(witness.starts_with(b"wtns"));
+        unsafe {
+            libc::free(wtns_data);
+        }
+    }
+
     #[test]
     fn test_deserialize_and_flatten_inputs() {
         let data = r#"{"v":{"a":1,"b":{"c":2},"d":[3,4]}}"#;
@@ -629,5 +652,283 @@ mod tests {
             U254::from(2),
             U254::from(3)]);
         assert_eq!(res, want);
+    }
+
+    #[test]
+    fn test_calc_witness_returns_error_for_truncated_graph_artifact() {
+        let bytes = WITNESSCALC_GRAPH_MAGIC_002.to_vec();
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_err());
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_out_of_range_node_index() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        // A graph that decodes cleanly but whose second node references a
+        // non-existent operand must produce an error, not a panic.
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        nodes.push_noopt(Node::Input(0));
+        nodes.push_noopt(Node::Op(Operation::Mul, 0, 5));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[1], &[], &[]).unwrap();
+
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+        assert!(result.is_ok(), "calc_witness must not panic");
+        assert!(result.unwrap().is_err());
+    }
+
+    fn graph_with_v2_input_metadata(
+        input_info: &[crate::vm2::InputInfo],
+        types: &[crate::vm2::Type],
+    ) -> Vec<u8> {
+        use crate::graph::{Node, Nodes, NodesInterface, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        nodes.push_noopt(Node::Input(1));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[0], input_info, types).unwrap();
+        bytes
+    }
+
+    fn calc_witness_err(inputs_json: &str, wcd_data: &[u8]) -> String {
+        let result = panic::catch_unwind(|| super::calc_witness(inputs_json, wcd_data));
+        assert!(result.is_ok(), "calc_witness must not panic");
+        result.unwrap().unwrap_err().to_string()
+    }
+
+    #[test]
+    fn test_calc_witness_handles_graph_mod_by_zero() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let zero = nodes.const_node_idx_from_value(U254::from(0));
+        nodes.push_noopt(Node::Input(0));
+        nodes.push_noopt(Node::Op(Operation::Mod, 1, zero));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[2], &[], &[]).unwrap();
+
+        let result = panic::catch_unwind(|| super::calc_witness("{}", &bytes));
+        assert!(result.is_ok(), "calc_witness must not panic");
+        assert!(result.unwrap().is_ok());
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_graph_composite_prime() {
+        use crate::graph::{Node, Nodes, NodesInterface, Operation, VecNodes};
+        use crate::storage::serialize_witnesscalc_graph;
+
+        let composite_prime = bn254_prime - U254::from(1);
+        let mut nodes = Nodes::new(composite_prime, "composite", VecNodes::new());
+        let four = nodes.const_node_idx_from_value(U254::from(4));
+        let two = nodes.const_node_idx_from_value(U254::from(2));
+        nodes.push_noopt(Node::Op(Operation::Div, four, two));
+
+        let mut bytes = Vec::new();
+        serialize_witnesscalc_graph(&mut bytes, &nodes, &[2], &[], &[]).unwrap();
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("Unsupported graph prime"));
+    }
+
+    #[test]
+    fn test_graph_v1_input_metadata_overflow_returns_error() {
+        let input_list: HashMap<String, Vec<U254>> = HashMap::new();
+        let mut inputs_info = super::InputSignalsInfo::new();
+        inputs_info.insert("a".to_string(), (usize::MAX, 1));
+
+        let err = super::init_inputs_from_inputs_mapping(&input_list, &inputs_info)
+            .unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_overflow_returns_error() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![usize::MAX, 2],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("overflows usize"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_invalid_bus_index() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("bus".to_string()),
+        }];
+        let types = vec![crate::vm2::Type {
+            name: "bus".to_string(),
+            fields: vec![crate::vm2::TypeField {
+                name: "x".to_string(),
+                kind: crate::vm2::TypeFieldKind::Bus(7),
+                offset: 0,
+                base_type_size: 1,
+                dims: vec![],
+            }],
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &types)
+            .unwrap_err();
+        assert!(err.to_string().contains("Bus type index is out of range"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_nested_invalid_bus_index() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("outer".to_string()),
+        }];
+        let types = vec![
+            crate::vm2::Type {
+                name: "outer".to_string(),
+                fields: vec![crate::vm2::TypeField {
+                    name: "inner".to_string(),
+                    kind: crate::vm2::TypeFieldKind::Bus(1),
+                    offset: 0,
+                    base_type_size: 1,
+                    dims: vec![],
+                }],
+            },
+            crate::vm2::Type {
+                name: "inner".to_string(),
+                fields: vec![crate::vm2::TypeField {
+                    name: "bad".to_string(),
+                    kind: crate::vm2::TypeFieldKind::Bus(99),
+                    offset: 0,
+                    base_type_size: 1,
+                    dims: vec![],
+                }],
+            },
+        ];
+        let bytes = graph_with_v2_input_metadata(&input_info, &types);
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("Bus type index is out of range"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_type_base_size_desync() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![],
+            type_id: Some("bus".to_string()),
+        }];
+        let types = vec![crate::vm2::Type {
+            name: "bus".to_string(),
+            fields: vec![crate::vm2::TypeField {
+                name: "x".to_string(),
+                kind: crate::vm2::TypeFieldKind::Ff,
+                offset: 0,
+                base_type_size: 2,
+                dims: vec![],
+            }],
+        }];
+        let bytes = graph_with_v2_input_metadata(&input_info, &types);
+
+        let err = calc_witness_err("{}", &bytes);
+        assert!(err.contains("base_type_size"));
+    }
+
+    #[test]
+    fn test_calc_witness_rejects_out_of_range_root_array_input() {
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![1],
+            type_id: None,
+        }];
+        let bytes = graph_with_v2_input_metadata(&input_info, &[]);
+
+        let err = calc_witness_err(r#"{"[999999]": "3"}"#, &bytes);
+        assert!(err.contains("outside input signal range"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_sparse_offsets() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![
+            crate::vm2::InputInfo {
+                name: "a".to_string(),
+                offset: 0,
+                lengths: vec![1],
+                type_id: None,
+            },
+            crate::vm2::InputInfo {
+                name: "b".to_string(),
+                offset: 4,
+                lengths: vec![1],
+                type_id: None,
+            },
+        ];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("contiguous"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_zero_sized_input() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![0],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("must be nonzero"));
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_accepts_nonzero_contiguous_offsets() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 7,
+            lengths: vec![1],
+            type_id: None,
+        }];
+
+        let inputs = super::init_inputs_from_v2("{\"a\":[\"9\"]}", &ff, &input_info, &[])
+            .unwrap();
+        assert_eq!(inputs, vec![U254::from(1), U254::from(9)]);
+    }
+
+    #[test]
+    fn test_graph_v2_input_metadata_rejects_oversized_component() {
+        let ff = Field::new(bn254_prime);
+        let input_info = vec![crate::vm2::InputInfo {
+            name: "a".to_string(),
+            offset: 0,
+            lengths: vec![super::MAX_GRAPH_V2_INPUT_SIGNALS + 1],
+            type_id: None,
+        }];
+
+        let err = super::init_inputs_from_v2("{}", &ff, &input_info, &[])
+            .unwrap_err();
+        assert!(err.to_string().contains("input count is too large"));
     }
 }

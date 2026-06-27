@@ -1,5 +1,5 @@
-use std::io::{Cursor, Error, ErrorKind};
-use crate::field::{FieldOperations, FieldOps, U254, U64};
+use std::io::{Cursor, Error, ErrorKind, Read};
+use crate::field::{bn254_prime, FieldOperations, FieldOps, U254, U64};
 use crate::graph::{Node, Nodes, NodesInterface, NodesStorage, Operation, TresOperation, UnoOperation, VecNodes};
 use crate::InputSignalsInfo;
 use crate::storage::{deserialize_input_signal_info, read_message, WriteBackReader, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
@@ -29,77 +29,110 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
         return Err(Error::other("Invalid magic"));
     };
 
-    let nodes_num = u64::from_le_bytes(bytes[idx..idx+8].try_into().unwrap());
+    let nodes_num = read_u64_le(bytes, idx, "Graph artifact missing node count")?;
     idx += 8;
 
-    let vm_ptr = u64::from_le_bytes(bytes[bytes.len() - 8..bytes.len()]
-        .try_into().unwrap());
-    let r = Cursor::new(&bytes[vm_ptr as usize..]);
+    // Layout: [magic][u64 node count][node messages][metadata][u64 metadata offset].
+    // The trailing u64 records where the metadata message begins.
+    const MISSING_METADATA_PTR: &str = "Graph artifact missing trailing metadata pointer";
+    if bytes.len() - idx < 8 {
+        return Err(Error::new(ErrorKind::UnexpectedEof, MISSING_METADATA_PTR));
+    }
+
+    let metadata_ptr_slot = bytes.len() - 8;
+    let metadata_offset = read_u64_le(bytes, metadata_ptr_slot, MISSING_METADATA_PTR)?;
+    let metadata_offset: usize = metadata_offset.try_into().map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Metadata offset {} cannot fit usize", metadata_offset),
+        )
+    })?;
+    if metadata_offset < idx || metadata_offset > metadata_ptr_slot {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Metadata offset {} is outside graph payload", metadata_offset),
+        ));
+    }
+
+    let metadata_bytes = checked_range(
+        bytes,
+        metadata_offset,
+        metadata_ptr_slot - metadata_offset,
+        "Graph metadata bytes are truncated",
+    )?;
+    let r = Cursor::new(metadata_bytes);
     let mut br = WriteBackReader::new(r);
     let md: crate::proto::GraphMetadata = read_message(&mut br)?;
+    let mut trailing = [0u8; 1];
+    if br.read(&mut trailing)? != 0 {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            "Graph metadata has trailing bytes",
+        ));
+    }
 
-    let (prime, curve_name) = if md.prime.is_none() {
+    let (prime, curve_name) = if let Some(prime) = &md.prime {
+        (
+            <U254 as FieldOps>::from_le_bytes(prime.value_le.as_slice()).map_err(|err| {
+                Error::new(
+                    ErrorKind::InvalidData,
+                    format!("Invalid metadata prime: {}", err),
+                )
+            })?,
+            md.prime_str.as_str(),
+        )
+    } else {
         (
             U254::from_str(
                 "21888242871839275222246405745257275088548364400416034343698204186575808495617")
                 .unwrap(),
             "bn128"
         )
-    } else {
-        (
-            <U254 as FieldOps>::from_le_bytes(
-                md.prime.unwrap().value_le.as_slice())
-                .unwrap(),
-            md.prime_str.as_str()
-        )
     };
 
-    let outer_nodes: Box<dyn NodesInterface> = match prime.bit_len() {
-        64 => {
-            let prime = U64::from_le_bytes(
-                &<U254 as FieldOps>::to_le_bytes(&prime))
-                .unwrap();
+    let outer_nodes: Box<dyn NodesInterface> = match graph_prime_kind(prime) {
+        Some(GraphPrimeKind::Goldilocks) => {
+            let prime = U64::new(GOLDILOCKS_PRIME);
             let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
                 prime, curve_name, node_storage);
-            for _ in 0..nodes_num {
-                let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
-                idx += int_len;
-                decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
-                idx += msg_len as usize;
-            }
+            decode_graph_nodes(bytes, idx, nodes_num, metadata_offset, &mut nodes)?;
             Box::new(nodes)
         }
-        254 => {
+        Some(GraphPrimeKind::Bn254) => {
             let node_storage = VecNodes::new();
             let mut nodes = Nodes::new(
                 prime, curve_name, node_storage);
-            for _ in 0..nodes_num {
-                let (msg_len, int_len) = decode_varint_u32(&bytes[idx..])?;
-                idx += int_len;
-                decode_node(&bytes[idx..idx+msg_len as usize], &mut nodes)?;
-                idx += msg_len as usize;
-            }
+            decode_graph_nodes(bytes, idx, nodes_num, metadata_offset, &mut nodes)?;
             Box::new(nodes)
         }
-        _ => {
+        None => {
             return Err(Error::new(
                 ErrorKind::InvalidData,
-                format!("unknown prime {}", md.prime_str)));
+                format!("Unsupported graph prime {}", prime)));
         }
     };
 
     let witness_signals = md.witness_signals
         .iter()
-        .map(|x| *x as usize)
-        .collect::<Vec<usize>>();
+        .map(|x| usize::try_from(*x).map_err(|_| {
+            Error::new(ErrorKind::InvalidData, "Witness signal index does not fit usize")
+        }))
+        .collect::<Result<Vec<usize>, Error>>()?;
 
     let inputs_info = if bytes.starts_with(WITNESSCALC_GRAPH_MAGIC_001) {
-        InputInfo::V1(md.inputs.iter()
+        let inputs = md.inputs.iter()
             .map(|(k, v)| {
-                (k.clone(), (v.offset as usize, v.len as usize))
+                let offset = usize::try_from(v.offset).map_err(|_| {
+                    Error::new(ErrorKind::InvalidData, "Input offset does not fit usize")
+                })?;
+                let len = usize::try_from(v.len).map_err(|_| {
+                    Error::new(ErrorKind::InvalidData, "Input length does not fit usize")
+                })?;
+                Ok((k.clone(), (offset, len)))
             })
-            .collect::<InputSignalsInfo>())
+            .collect::<Result<InputSignalsInfo, Error>>()?;
+        InputInfo::V1(inputs)
     } else if bytes.starts_with(WITNESSCALC_GRAPH_MAGIC_002) {
         let (input_info, types) = deserialize_input_signal_info(&md.input_signal_info)?;
         InputInfo::V2 { input_info, types }
@@ -108,6 +141,109 @@ pub fn deserialize_witnesscalc_graph_from_bytes(
     };
 
     Ok((outer_nodes, witness_signals, inputs_info))
+}
+
+const GOLDILOCKS_PRIME: u64 = 18446744069414584321;
+
+enum GraphPrimeKind {
+    Bn254,
+    Goldilocks,
+}
+
+fn graph_prime_kind(prime: U254) -> Option<GraphPrimeKind> {
+    if prime == bn254_prime {
+        Some(GraphPrimeKind::Bn254)
+    } else if prime == U254::from(GOLDILOCKS_PRIME) {
+        Some(GraphPrimeKind::Goldilocks)
+    } else {
+        None
+    }
+}
+
+fn read_u64_le(bytes: &[u8], offset: usize, context: &str) -> Result<u64, Error> {
+    let bytes = checked_range(bytes, offset, 8, context)?;
+    let mut buf = [0u8; 8];
+    buf.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn checked_range<'a>(
+    bytes: &'a [u8],
+    offset: usize,
+    len: usize,
+    context: &str,
+) -> Result<&'a [u8], Error> {
+    let end = offset.checked_add(len).ok_or_else(|| {
+        Error::new(ErrorKind::InvalidData, "Byte range length overflows usize")
+    })?;
+    bytes.get(offset..end).ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, context))
+}
+
+fn decode_graph_nodes<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    bytes: &[u8],
+    mut idx: usize,
+    nodes_num: u64,
+    metadata_offset: usize,
+    nodes: &mut Nodes<T, NS>,
+) -> Result<(), Error> {
+    for _ in 0..nodes_num {
+        if idx > metadata_offset {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Node cursor moved past metadata offset",
+            ));
+        }
+
+        let (msg_len, int_len) = decode_varint_u32(&bytes[idx..metadata_offset])?;
+        idx += int_len;
+        let msg_len = msg_len as usize;
+        let msg_end = idx.checked_add(msg_len).ok_or_else(|| {
+            Error::new(ErrorKind::InvalidData, "Node length overflows usize")
+        })?;
+        // Nodes sit before the metadata, so msg_end must stay within it. A node
+        // that runs past the whole artifact is truncation (UnexpectedEof); one
+        // that fits the buffer but spills into the metadata is malformed
+        // (InvalidData).
+        if msg_end > bytes.len() {
+            return Err(Error::new(
+                ErrorKind::UnexpectedEof,
+                "Node length extends past graph artifact",
+            ));
+        }
+        if msg_end > metadata_offset {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Node length extends past metadata offset",
+            ));
+        }
+
+        let node_bytes = checked_range(
+            bytes,
+            idx,
+            msg_len,
+            "Node bytes are truncated",
+        )?;
+        let nodes_before = nodes.len();
+        decode_node(node_bytes, nodes)?;
+        if nodes.len() != nodes_before + 1 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "Decoded node record did not produce exactly one graph node",
+            ));
+        }
+        idx = msg_end;
+    }
+
+    if idx != metadata_offset {
+        return Err(Error::new(
+            ErrorKind::InvalidData,
+            format!(
+                "Decoded node bytes ended at {} but metadata starts at {}",
+                idx, metadata_offset),
+        ));
+    }
+
+    Ok(())
 }
 
 #[repr(u8)]
@@ -175,9 +311,10 @@ pub fn decode_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
         3 => decode_uno_op_node(bytes, nodes),
         4 => decode_duo_op_node(bytes, nodes),
         5 => decode_tres_op_node(bytes, nodes),
-        _ => {
-            panic!("found unknown node")
-        }
+        _ => Err(Error::new(
+            ErrorKind::InvalidData,
+            format!("Found unknown node field number {}", field_number),
+        )),
     }
 }
 
@@ -490,7 +627,13 @@ fn decode_constant_node<T: FieldOps + 'static, NS: NodesStorage + 'static>(
 fn read_tag(bytes: &[u8]) -> Result<(u32, WireType, usize), Error> {
     let (tag, consumed) = decode_varint_u32(bytes)?;
     let field_number = tag >> 3;
-    let wire_type = TryFrom::<u8>::try_from((tag & 0x7) as u8).unwrap();
+    let wire_type = (tag & 0x7) as u8;
+    let wire_type = WireType::try_from(wire_type).map_err(|_| {
+        Error::new(
+            ErrorKind::InvalidData,
+            format!("Invalid protobuf wire type {}", wire_type),
+        )
+    })?;
     Ok((field_number, wire_type, consumed))
 }
 

@@ -34,6 +34,37 @@ fn write_signal<W: Write>(w: &mut W, signal: &vm2::Signal) -> std::io::Result<()
     Ok(())
 }
 
+/// Allocate a `Vec` with capacity for `count` elements decoded from an
+/// artifact. The count is attacker-controlled, so reserve fallibly and return
+/// an error instead of letting an implausibly large value abort the process
+/// with an out-of-memory allocation.
+fn reserve_from_count<T>(count: usize) -> std::io::Result<Vec<T>> {
+    let mut vec = Vec::new();
+    vec.try_reserve(count).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Decoded element count exceeds available memory",
+        )
+    })?;
+    Ok(vec)
+}
+
+/// Read exactly `len` bytes from an artifact into a fresh `Vec`. `len` is
+/// attacker-controlled, so grow the buffer to the bytes actually available
+/// (bounded by `take`) instead of allocating `len` up front, which for a
+/// corrupt length would abort the process with an out-of-memory error.
+fn read_exact_vec<R: Read>(r: &mut R, len: usize) -> std::io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    r.take(len as u64).read_to_end(&mut buf)?;
+    if buf.len() != len {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "Artifact ended before the declared length",
+        ));
+    }
+    Ok(buf)
+}
+
 fn read_signal<R: Read>(r: &mut R) -> std::io::Result<vm2::Signal> {
     let signal_type = r.read_u8()?;
     match signal_type {
@@ -373,32 +404,42 @@ pub fn serialize_witnesscalc_vm(
 }
 
 fn read_message_length<R: Read>(rw: &mut WriteBackReader<R>) -> std::io::Result<usize> {
-    let mut buf = [0u8; MAX_VARINT_LENGTH];
-    let bytes_read = rw.read(&mut buf)?;
-    if bytes_read == 0 {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
+    let mut value = 0u64;
+    for i in 0..MAX_VARINT_LENGTH {
+        let mut byte = [0u8; 1];
+        if rw.read(&mut byte)? == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "Unexpected EOF while reading length delimiter",
+            ));
+        }
+
+        if i == MAX_VARINT_LENGTH - 1 && byte[0] > 1 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Length delimiter does not fit u64",
+            ));
+        }
+        value |= ((byte[0] & 0x7f) as u64) << (7 * i);
+        if byte[0] < 0x80 {
+            return usize::try_from(value).map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Length delimiter does not fit usize",
+                )
+            });
+        }
     }
 
-    let len_delimiter = prost::decode_length_delimiter(buf.as_ref())?;
-
-    let lnln = prost::length_delimiter_len(len_delimiter);
-
-    if lnln < bytes_read {
-        rw.write_all(&buf[lnln..bytes_read])?;
-    }
-
-    Ok(len_delimiter)
+    Err(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "Length delimiter varint is too long",
+    ))
 }
 
 fn read_message<R: Read, M: Message + Default>(rw: &mut WriteBackReader<R>) -> std::io::Result<M> {
     let ln = read_message_length(rw)?;
-    let mut buf = vec![0u8; ln];
-    let bytes_read = rw.read(&mut buf)?;
-    if bytes_read != ln {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof, "Unexpected EOF"));
-    }
+    let buf = read_exact_vec(rw, ln)?;
 
     let msg = prost::Message::decode(&buf[..])?;
 
@@ -643,32 +684,37 @@ pub fn serialize_input_signal_info(
 
 pub fn deserialize_input_infos<R: Read>(r: &mut R) -> std::io::Result<Vec<vm2::InputInfo>> {
     let num_input_infos = r.read_u32::<LittleEndian>()? as usize;
-    let mut input_infos = Vec::with_capacity(num_input_infos);
+    let mut input_infos = reserve_from_count(num_input_infos)?;
 
     for _ in 0..num_input_infos {
         let name_len = r.read_u32::<LittleEndian>()? as usize;
-        let mut name_bytes = vec![0u8; name_len];
-        r.read_exact(&mut name_bytes)?;
+        let name_bytes = read_exact_vec(r, name_len)?;
         let name = String::from_utf8(name_bytes)
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in input name"))?;
 
         let offset = r.read_u32::<LittleEndian>()? as usize;
 
         let num_lengths = r.read_u32::<LittleEndian>()? as usize;
-        let mut lengths = Vec::with_capacity(num_lengths);
+        let mut lengths = reserve_from_count(num_lengths)?;
         for _ in 0..num_lengths {
             lengths.push(r.read_u32::<LittleEndian>()? as usize);
         }
 
         let has_type_id = r.read_u8()?;
-        let type_id = if has_type_id == 1 {
-            let type_id_len = r.read_u32::<LittleEndian>()? as usize;
-            let mut type_id_bytes = vec![0u8; type_id_len];
-            r.read_exact(&mut type_id_bytes)?;
-            Some(String::from_utf8(type_id_bytes)
-                .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in type_id"))?)
-        } else {
-            None
+        let type_id = match has_type_id {
+            0 => None,
+            1 => {
+                let type_id_len = r.read_u32::<LittleEndian>()? as usize;
+                let type_id_bytes = read_exact_vec(r, type_id_len)?;
+                Some(String::from_utf8(type_id_bytes)
+                    .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in type_id"))?)
+            }
+            _ => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "Invalid input type_id discriminator",
+                ));
+            }
         };
 
         input_infos.push(vm2::InputInfo {
@@ -684,22 +730,20 @@ pub fn deserialize_input_infos<R: Read>(r: &mut R) -> std::io::Result<Vec<vm2::I
 
 pub fn deserialize_types<R: Read>(r: &mut R) -> std::io::Result<Vec<vm2::Type>> {
     let num_types = r.read_u32::<LittleEndian>()? as usize;
-    let mut types = Vec::with_capacity(num_types);
+    let mut types = reserve_from_count(num_types)?;
 
     for _ in 0..num_types {
         let name_len = r.read_u32::<LittleEndian>()? as usize;
-        let mut name_bytes = vec![0u8; name_len];
-        r.read_exact(&mut name_bytes)?;
+        let name_bytes = read_exact_vec(r, name_len)?;
         let name = String::from_utf8(name_bytes)
             .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in type name"))?;
 
         let num_fields = r.read_u32::<LittleEndian>()? as usize;
-        let mut fields = Vec::with_capacity(num_fields);
+        let mut fields = reserve_from_count(num_fields)?;
 
         for _ in 0..num_fields {
             let field_name_len = r.read_u32::<LittleEndian>()? as usize;
-            let mut field_name_bytes = vec![0u8; field_name_len];
-            r.read_exact(&mut field_name_bytes)?;
+            let field_name_bytes = read_exact_vec(r, field_name_len)?;
             let field_name = String::from_utf8(field_name_bytes)
                 .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid UTF-8 in field name"))?;
 
@@ -717,7 +761,7 @@ pub fn deserialize_types<R: Read>(r: &mut R) -> std::io::Result<Vec<vm2::Type>> 
             let base_type_size = r.read_u32::<LittleEndian>()? as usize;
 
             let num_dims = r.read_u32::<LittleEndian>()? as usize;
-            let mut dims = Vec::with_capacity(num_dims);
+            let mut dims = reserve_from_count(num_dims)?;
             for _ in 0..num_dims {
                 dims.push(r.read_u32::<LittleEndian>()? as usize);
             }
@@ -744,6 +788,13 @@ pub fn deserialize_input_signal_info(data: &[u8]) -> std::io::Result<(Vec<vm2::I
     let mut cursor = std::io::Cursor::new(data);
     let input_infos = deserialize_input_infos(&mut cursor)?;
     let types = deserialize_types(&mut cursor)?;
+    let mut trailing = [0u8; 1];
+    if cursor.read(&mut trailing)? != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "Trailing bytes in input signal info",
+        ));
+    }
     Ok((input_infos, types))
 }
 
@@ -998,7 +1049,9 @@ mod tests {
     use crate::vm::ComponentTmpl;
     use crate::field::{bn254_prime, FieldOperations, U254, U64};
     use crate::InputSignalsInfo;
-    use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
+    use crate::storage::proto_deserializer::{
+        decode_node, decode_varint_u32, deserialize_witnesscalc_graph_from_bytes, InputInfo,
+    };
     use super::*;
 
     #[test]
@@ -1166,6 +1219,210 @@ mod tests {
         };
 
         assert_eq!(metadata, metadata_want);
+    }
+
+    fn graph_decode_error(bytes: &[u8]) -> std::io::Error {
+        match deserialize_witnesscalc_graph_from_bytes(bytes) {
+            Ok(_) => panic!("expected graph decode error"),
+            Err(err) => err,
+        }
+    }
+
+    fn graph_artifact(
+        nodes_num: u64,
+        node_bytes: &[u8],
+        metadata_bytes: &[u8],
+        metadata_ptr: u64,
+    ) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(WITNESSCALC_GRAPH_MAGIC_002);
+        bytes.write_u64::<LittleEndian>(nodes_num).unwrap();
+        bytes.extend_from_slice(node_bytes);
+        bytes.extend_from_slice(metadata_bytes);
+        bytes.write_u64::<LittleEndian>(metadata_ptr).unwrap();
+        bytes
+    }
+
+    fn malformed_graph_artifact(nodes_num: u64, node_bytes: &[u8], metadata_ptr: u64) -> Vec<u8> {
+        graph_artifact(nodes_num, node_bytes, &[0], metadata_ptr)
+    }
+
+    #[test]
+    fn test_graph_magic_only_returns_unexpected_eof() {
+        let err = graph_decode_error(WITNESSCALC_GRAPH_MAGIC_002);
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_graph_missing_node_count_returns_unexpected_eof() {
+        let mut bytes = WITNESSCALC_GRAPH_MAGIC_002.to_vec();
+        bytes.extend_from_slice(&[0; 7]);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_graph_missing_metadata_pointer_returns_unexpected_eof() {
+        let mut bytes = WITNESSCALC_GRAPH_MAGIC_002.to_vec();
+        bytes.write_u64::<LittleEndian>(0).unwrap();
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_graph_metadata_pointer_past_end_returns_invalid_data() {
+        let bytes = malformed_graph_artifact(0, &[], u64::MAX);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_graph_node_length_past_artifact_returns_unexpected_eof() {
+        let node_bytes = [0xff, 0x01];
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8 + node_bytes.len()) as u64;
+        let bytes = malformed_graph_artifact(1, &node_bytes, metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_graph_node_bytes_must_end_at_metadata_pointer() {
+        let node_bytes = [0];
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8 + node_bytes.len()) as u64;
+        let bytes = malformed_graph_artifact(0, &node_bytes, metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_graph_metadata_must_consume_full_region() {
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8) as u64;
+        let bytes = graph_artifact(0, &[], &[0, 0], metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_graph_truncated_metadata_length_returns_unexpected_eof() {
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8) as u64;
+        let bytes = graph_artifact(0, &[], &[0x80], metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_graph_overlong_metadata_length_returns_invalid_data() {
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8) as u64;
+        let bytes = graph_artifact(0, &[], &[0xff; MAX_VARINT_LENGTH], metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_duplicate_constant_nodes_return_invalid_data() {
+        let constant = crate::proto::node::Node::Constant(crate::proto::ConstantNode {
+            value: Some(crate::proto::BigUInt { value_le: vec![7] }),
+        });
+        let mut node_bytes = Vec::new();
+        crate::proto::Node {
+            node: Some(constant.clone()),
+        }
+        .encode_length_delimited(&mut node_bytes)
+        .unwrap();
+        crate::proto::Node {
+            node: Some(constant),
+        }
+        .encode_length_delimited(&mut node_bytes)
+        .unwrap();
+
+        let metadata_ptr = (WITNESSCALC_GRAPH_MAGIC_002.len() + 8 + node_bytes.len()) as u64;
+        let bytes = malformed_graph_artifact(2, &node_bytes, metadata_ptr);
+
+        let err = graph_decode_error(&bytes);
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_unknown_node_field_number_returns_invalid_data() {
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let err = decode_node(&[0x32, 0x00], &mut nodes).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("field number 6"));
+    }
+
+    #[test]
+    fn test_invalid_protobuf_wire_type_returns_invalid_data() {
+        let mut nodes = Nodes::new(bn254_prime, "bn128", VecNodes::new());
+        let err = decode_node(&[0x0e], &mut nodes).unwrap_err();
+
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("Invalid protobuf wire type 6"));
+    }
+
+    #[test]
+    fn test_varint_errors_do_not_panic() {
+        let err = decode_varint_u32(&[0x80]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+
+        let err = decode_varint_u32(&[0x80, 0x80, 0x80, 0x80, 0x80]).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_decode_rejects_absurd_element_count() {
+        // A count of u32::MAX with no payload must return an error rather than
+        // attempt a multi-gigabyte up-front allocation and abort the process.
+        let mut bytes = Vec::new();
+        bytes.write_u32::<LittleEndian>(u32::MAX).unwrap();
+        let err = deserialize_input_infos(&mut std::io::Cursor::new(bytes)).unwrap_err();
+        assert!(matches!(
+            err.kind(),
+            std::io::ErrorKind::InvalidData | std::io::ErrorKind::UnexpectedEof
+        ));
+    }
+
+    #[test]
+    fn test_decode_rejects_absurd_byte_length() {
+        // One input info whose name claims u32::MAX bytes with none following
+        // must return an error rather than allocate the buffer up front.
+        let mut bytes = Vec::new();
+        bytes.write_u32::<LittleEndian>(1).unwrap();
+        bytes.write_u32::<LittleEndian>(u32::MAX).unwrap();
+        let err = deserialize_input_infos(&mut std::io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn test_decode_rejects_invalid_type_id_discriminator() {
+        let mut bytes = Vec::new();
+        bytes.write_u32::<LittleEndian>(1).unwrap();
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes.write_u8(2).unwrap();
+
+        let err = deserialize_input_infos(&mut std::io::Cursor::new(bytes)).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn test_decode_rejects_trailing_input_signal_info() {
+        let mut bytes = Vec::new();
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes.write_u32::<LittleEndian>(0).unwrap();
+        bytes.push(0);
+
+        let err = deserialize_input_signal_info(&bytes).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 
     #[test]

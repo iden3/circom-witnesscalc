@@ -594,6 +594,9 @@ impl<T: FieldOps> FieldOperations for &Field<T> {
 
     #[inline]
     fn modulo(&self, lhs: Self::Type, rhs: Self::Type) -> Self::Type {
+        if rhs == T::zero() {
+            return T::zero();
+        }
         lhs % rhs
     }
 
