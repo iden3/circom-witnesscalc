@@ -227,9 +227,12 @@ fn main() {
 
     let start = Instant::now();
     // TODO: pass expected signals
-    execute(
+    if let Err(err) = execute(
         main_component, &cs.templates, &cs.functions, &cs.constants,
-        &mut signals, &cs.io_map, None);
+        &mut signals, &cs.io_map, None) {
+        eprintln!("VM execution failed: {}", err);
+        std::process::exit(1);
+    }
     println!("VM execution done in {:?}.", start.elapsed());
 
     let start = Instant::now();

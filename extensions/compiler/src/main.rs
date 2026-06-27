@@ -437,9 +437,12 @@ fn main() {
             .unwrap();
         init_input_signals(&main_inputs, &inputs, &mut signals2);
 
-        execute(
+        if let Err(err) = execute(
             main_component, &cs.templates, &cs.functions, &cs.constants,
-            &mut signals2, &cs.io_map, args.expected_signals.as_ref());
+            &mut signals2, &cs.io_map, args.expected_signals.as_ref()) {
+            eprintln!("VM execution failed: {}", err);
+            std::process::exit(1);
+        }
 
         println!("Execution time: {:?}", start.elapsed());
 
