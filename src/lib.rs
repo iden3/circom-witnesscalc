@@ -7,6 +7,7 @@ pub mod graph;
 pub mod storage;
 pub mod vm;
 pub mod vm2;
+mod input_diagnostics;
 mod vm2_setup;
 pub mod ast;
 
@@ -25,6 +26,10 @@ use ark_bn254::Fr;
 use ark_ff::{BigInteger, PrimeField};
 use indicatif::{ProgressBar, ProgressStyle};
 use crate::field::{bn254_prime, Field, FieldOperations, FieldOps, U254, U64};
+use crate::input_diagnostics::{
+    format_input_mapping_names, format_missing_input_mapping_message, json_value_kind,
+    missing_input_mapping_names,
+};
 use crate::storage::proto_deserializer::{deserialize_witnesscalc_graph_from_bytes, InputInfo};
 use crate::storage::{deserialize_witnesscalc_vm2_body, read_witnesscalc_vm2_header, WITNESSCALC_CVM_MAGIC, WITNESSCALC_GRAPH_MAGIC_002, WITNESSCALC_GRAPH_MAGIC_001};
 use crate::vm2::{execute, Circuit, Component};
@@ -295,40 +300,6 @@ fn init_inputs_from_inputs_mapping<T: FieldOps>(
     Ok(inputs)
 }
 
-fn format_input_mapping_names(inputs_info: &InputSignalsInfo) -> String {
-    let mut names: Vec<&str> = inputs_info.keys().map(String::as_str).collect();
-    names.sort_unstable();
-    if names.is_empty() {
-        "(none)".to_string()
-    } else {
-        names.join(", ")
-    }
-}
-
-fn missing_input_mapping_names(
-    inputs_info: &InputSignalsInfo,
-    inputs_set: &[bool],
-) -> Vec<String> {
-    let mut names: Vec<String> = inputs_info
-        .iter()
-        .filter_map(|(name, &(offset, len))| {
-            let is_missing = (offset..offset + len)
-                .any(|idx| !inputs_set.get(idx).copied().unwrap_or(false));
-            is_missing.then(|| name.clone())
-        })
-        .collect();
-    names.sort_unstable();
-    names
-}
-
-fn format_missing_input_mapping_message(names: &[String]) -> String {
-    if names.len() == 1 {
-        format!("missing input signal {}", names[0])
-    } else {
-        format!("missing input signals {}", names.join(", "))
-    }
-}
-
 fn init_inputs_from_v2<T: FieldOps>(
     inputs_json: &str,
     ff: &Field<T>,
@@ -461,17 +432,6 @@ fn flatten_array<T: FieldOps>(
     };
 
     Ok(())
-}
-
-fn json_value_kind(v: &serde_json::Value) -> &'static str {
-    match v {
-        serde_json::Value::Null => "null",
-        serde_json::Value::Bool(_) => "boolean",
-        serde_json::Value::Number(_) => "number",
-        serde_json::Value::String(_) => "string",
-        serde_json::Value::Array(_) => "array",
-        serde_json::Value::Object(_) => "object",
-    }
 }
 
 pub fn deserialize_inputs(inputs_data: &[u8]) -> Result<HashMap<String, Vec<U256>>, Error> {
