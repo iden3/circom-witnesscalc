@@ -1,10 +1,9 @@
-use std::{collections::HashMap, ops::{BitAnd, Shl, Shr}};
 use std::any::Any;
 use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Debug;
 use std::fs::File;
-use std::ops::{BitOr, BitXor, Not};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 use crate::field::{Field, FieldOperations, FieldOps, M};
@@ -16,6 +15,10 @@ use rand::prelude::ThreadRng;
 use ruint::uint;
 use tempfile::NamedTempFile;
 use crate::progress_bar;
+
+mod bn254;
+
+pub use bn254::evaluate_bn254;
 
 #[derive(Hash, PartialEq, Eq, Debug, Clone, Copy, Serialize, Deserialize)]
 pub enum Operation {
@@ -59,7 +62,15 @@ impl Operation {
             Add => a.add_mod(b, M),
             Sub => a.add_mod(M - b, M),
             Pow => a.pow_mod(b, M),
-            Mod => a.div_rem(b).1,
+            Mod => {
+                if b == U256::ZERO {
+                    // Keep witness evaluation total, matching the zero-divisor convention
+                    // used by Div/Idiv.
+                    U256::ZERO
+                } else {
+                    a.div_rem(b).1
+                }
+            },
             Eq => U256::from(a == b),
             Neq => U256::from(a != b),
             Lt => u_lt(&a, &b),
@@ -72,11 +83,11 @@ impl Operation {
             Shr => compute_shr_uint(a, b),
             // TODO test with conner case when it is possible to get the number
             //      bigger then modulus
-            Bor => a.bitor(b),
-            Band => a.bitand(b),
+            Bor => a | b,
+            Band => a & b,
             // TODO test with conner case when it is possible to get the number
             //      bigger then modulus
-            Bxor => a.bitxor(b),
+            Bxor => a ^ b,
             Idiv => if b == U256::ZERO { U256::ZERO } else { a / b },
         }
     }
@@ -186,8 +197,8 @@ impl UnoOperation {
                 U256::ZERO
             },
             UnoOperation::Bnot => {
-                let a = a.not();
-                let mask = U256::ZERO.not().shr(M.leading_zeros());
+                let a = !a;
+                let mask = !U256::ZERO >> M.leading_zeros();
                 let a = a & mask;
                 if a >= M { a - M } else { a }
             },
@@ -204,7 +215,7 @@ fn sqrt_mod_prime(a: U256) -> U256 {
     let zero = U256::ZERO;
     let mut q = M - one;
     let mut s: u32 = 0;
-    while q.bitand(one) == zero {
+    while q & one == zero {
         q >>= 1;
         s += 1;
     }
@@ -937,13 +948,13 @@ impl Error for NodeConstErr {}
 fn compute_shl_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));
     let ls_limb = b.as_limbs()[0];
-    a.shl(ls_limb as usize)
+    a << ls_limb as usize
 }
 
 fn compute_shr_uint(a: U256, b: U256) -> U256 {
     debug_assert!(b.lt(&U256::from(256)));
     let ls_limb = b.as_limbs()[0];
-    a.shr(ls_limb as usize)
+    a >> ls_limb as usize
 }
 
 /// All references must be backwards.
@@ -1479,6 +1490,10 @@ mod tests {
     #[test]
     fn test_fr_mod() {
         assert_eq!(
+            Operation::Mod.eval(U256::from(7u64), U256::from(0u64)),
+            U256::from(0));
+
+        assert_eq!(
             Operation::Mod.eval(U256::from(7u64), U256::from(2u64)),
             U256::from(1));
 
@@ -1626,7 +1641,7 @@ mod tests {
         let a = BN254::from_str_radix(
             "18583076334226168172367231819260574371431472897769128993835383390508861945746",
             10).unwrap();
-        let a = a.not();
+        let a = !a;
         // let mask = BN254::ZERO.not().shr(m.leading_zeros());
         // let a = a & mask;
         let a = if a >= m { a - m } else { a };
@@ -1742,4 +1757,5 @@ mod tests {
             nodes.get(1).unwrap(),
             Node::TresOp(TresOperation::TernCond, 7, 8, 9));
     }
+
 }
