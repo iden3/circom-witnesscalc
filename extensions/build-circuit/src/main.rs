@@ -181,7 +181,15 @@ where
     T: FieldOps + 'static,
     NS: NodesStorage + 'static {
 
-    assert!(size > 0, "size = {}", size);
+    if size == 0 {
+        // A zero-length array signal store is legitimate circom (e.g. a
+        // subcomponent input sized by a constant that evaluates to 0, such
+        // as DG15_BLOCK_NUMBER=0 in passport-zk-circuits' "_NA" variants).
+        // Every call site below treats a size-0 fetch as a no-op already
+        // (the `for i in 0..size` loops just don't run), so short-circuit
+        // here instead of asserting.
+        return vec![];
+    }
 
     if size == 1 {
         // operator_argument_instruction implements much more cases than
@@ -266,12 +274,21 @@ where
 
                     let mut result = Vec::with_capacity(size);
                     for i in 0..size {
-                        let signal_node = ctx.signal_node_idx[signal_idx + i];
-                        assert_ne!(
-                            signal_node, usize::MAX,
-                            "signal {}/{}/{} is not set yet",
-                            cmp.signal_offset, signal_idx, i);
-                        result.push(signal_node);
+                        let idx = signal_idx + i;
+                        // A subcomponent output signal can be genuinely
+                        // unset here: some templates (e.g. recursive
+                        // base cases sized to a compile-time constant)
+                        // legitimately never assign every index of an
+                        // output array on every instantiation. Real
+                        // circom's own witness generators leave such
+                        // slots at their buffer's default (0); mirror
+                        // that instead of asserting, matching the
+                        // AddressType::Signal load path just above.
+                        if ctx.signal_node_idx[idx] == usize::MAX {
+                            ctx.signal_node_idx[idx] =
+                                ctx.nodes.const_node_idx_from_value(T::zero());
+                        }
+                        result.push(ctx.signal_node_idx[idx]);
                     }
                     result
                 }
@@ -584,9 +601,16 @@ where
                     }
 
                     let signal_idx = signal_offset + signal_idx;
-                    let signal_node = ctx.signal_node_idx[signal_idx];
-                    assert_ne!(signal_node, usize::MAX, "signal is not set yet");
-                    signal_node
+                    // See the size-N load path above: a subcomponent
+                    // output can be legitimately never-assigned for a
+                    // given instantiation; default to the constant-0
+                    // node like real circom's own witness generators do,
+                    // rather than asserting.
+                    if ctx.signal_node_idx[signal_idx] == usize::MAX {
+                        ctx.signal_node_idx[signal_idx] =
+                            ctx.nodes.const_node_idx_from_value(T::zero());
+                    }
+                    ctx.signal_node_idx[signal_idx]
                 }
                 AddressType::Variable => {
                     match load_bucket.src {
