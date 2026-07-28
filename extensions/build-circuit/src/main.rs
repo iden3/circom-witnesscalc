@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config, VCP};
-use compiler::intermediate_representation::ir_interface::{AccessType, AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnBucket, ReturnType, SizeOption, StatusInput, StoreBucket, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AccessType, AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnBucket, ReturnType, SizeOption, StatusInput, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1691,43 +1691,44 @@ fn calc_return_load_idx<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     idx.must_const_usize(nodes, call_stack)
 }
 
-// return variable value and it's index
-fn store_function_variable<T: FieldOps + 'static, NS: NodesStorage + 'static>(
-    store_bucket: &StoreBucket, fn_vars: &mut Vec<Option<Var<T>>>,
-    nodes: &mut Nodes<T, NS>, call_stack: &Vec<String>) -> (Var<T>, usize) {
 
-    assert!(matches!(store_bucket.dest_address_type, AddressType::Variable),
-            "functions can store only inside variables: dest_address_type: {}",
-            store_bucket.dest_address_type.to_string());
+// Reconciles a dynamic (signal-dependent) if/else's two independently-run
+// variable states back into fn_vars, one slot at a time: where a variable's
+// value is the same on both sides, keep it as-is; where the branches
+// disagree, build a TernCond over the two values, falling back to the
+// pre-branch value for whichever side never touched that variable at all
+// (mirrors collect_branch_stores_from_branch's template-level equivalent).
+fn merge_ternary_fn_vars<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, cond_node_idx: usize,
+    vars_before: &[Option<Var<T>>], vars_after_if: &[Option<Var<T>>],
+    vars_after_else: &[Option<Var<T>>], fn_vars: &mut [Option<Var<T>>],
+    call_stack: &Vec<String>) {
 
-    let (location, template_header) = match &store_bucket.dest {
-        LocationRule::Indexed {
-            location,
-            template_header,
-        } => {
-            (location, template_header)
-        }
-        LocationRule::Mapped { .. } => {
-            panic!("location rule supposed to be Indexed for variables");
-        }
-    };
+    for idx in 0..fn_vars.len() {
+        let if_val = vars_after_if[idx].clone().or_else(|| vars_before[idx].clone());
+        let else_val = vars_after_else[idx].clone().or_else(|| vars_before[idx].clone());
 
-    let lvar_idx =
-        calc_function_expression(
-            location, fn_vars, nodes, call_stack)
-            .must_const_usize(nodes, call_stack);
-
-    let size = expect_single_size(&store_bucket.context.size);
-    assert_eq!(
-        size, 1,
-        "variable size in ternary expression must be 1: {}, {}:{}",
-        template_header.as_ref().unwrap_or(&"-".to_string()),
-        call_stack.join(" -> "), store_bucket.get_line());
-
-    let v = calc_function_expression(
-        &store_bucket.src, fn_vars, nodes, call_stack);
-
-    (v, lvar_idx)
+        fn_vars[idx] = match (if_val, else_val) {
+            (None, None) => None,
+            (Some(if_v), Some(else_v)) => {
+                let if_node = node_from_var(&if_v, ctx.nodes);
+                let else_node = node_from_var(&else_v, ctx.nodes);
+                if if_node == else_node {
+                    Some(if_v)
+                } else {
+                    let node_idx = ctx.nodes.push(Node::TresOp(
+                        TresOperation::TernCond, cond_node_idx, if_node,
+                        else_node)).0;
+                    Some(Var::Node(node_idx))
+                }
+            }
+            _ => panic!(
+                "variable #{} is set on only one side of a dynamic \
+                 (signal-dependent) if/else with no prior value to fall \
+                 back on for the other side: {}",
+                idx, call_stack.join(" -> ")),
+        };
+    }
 }
 
 fn process_function_instruction<T, NS>(
@@ -1807,101 +1808,99 @@ where
                     }
                 }
                 Err(NodeConstErr::InputSignal) => { // dynamic condition expression
-                    // The only supported dynamic condition is a ternary operation
-                    // Both branches should be exactly one operation of
-                    // storing a variable to the same signal index.
-                    assert_eq!(
-                        branch_bucket.if_branch.len(), 1,
-                        "expected a ternary operation but it doesn't looks like one as the 'if' branch is not of length 1: {}: {}:{}",
-                        branch_bucket.else_branch.len(),
-                        call_stack.join(" -> "), branch_bucket.get_line());
-                    if branch_bucket.else_branch.len() > 1 {
-                        panic!(
-                            "expected a ternary operation but it doesn't looks like one as the 'else' branch is not of length 1: {}: {}:{}",
-                            branch_bucket.else_branch.len(),
-                            call_stack.join(" -> "),
-                            branch_bucket.line);
-                        }
+                    // A signal-dependent condition means both possible
+                    // outcomes have to be built into the graph and combined
+                    // with a TernCond, since we can't know at build time
+                    // which one the real witness will take. Each branch may
+                    // be an arbitrary sequence of statements (assignments,
+                    // nested branches - dynamic or static, calls, etc.),
+                    // not just a single instruction: run each branch for
+                    // real (via the ordinary recursive interpreter, so
+                    // read-after-write within a branch and nested branches
+                    // both just work) against its own copy of fn_vars
+                    // starting from the same pre-branch snapshot, then
+                    // reconcile the two resulting states.
                     let cond_node_idx = if let Var::Node(node_idx) = cond {
                         node_idx
                     } else {
                         panic!("[assertion] expected to have a node with ternary operation here");
                     };
-                    let (var_if, var_if_idx) = match *branch_bucket.if_branch[0] {
-                        Instruction::Store(ref store_bucket) => {
-                            store_function_variable(
-                                store_bucket, fn_vars, ctx.nodes, call_stack)
-                        }
-                        Instruction::Return(ref return_bucket) => {
-                            let ret = build_return(
-                                return_bucket, fn_vars, ctx.nodes, call_stack);
-                            let var_if = fn_return_to_var(
-                                ret, fn_vars, call_stack);
-                            if branch_bucket.else_branch.is_empty() {
-                                pending_returns.push((cond_node_idx, var_if));
-                                return None;
-                            } else {
-                                match *branch_bucket.else_branch[0] {
-                                    Instruction::Return(ref else_return_bucket) => {
-                                        let var_else = fn_return_to_var(
-                                            build_return(
-                                                else_return_bucket, fn_vars,
-                                                ctx.nodes, call_stack),
-                                            fn_vars, call_stack);
-                                        let if_idx = node_from_var(
-                                            &var_if, ctx.nodes);
-                                        let else_idx = node_from_var(
-                                            &var_else, ctx.nodes);
-                                        let tern_node_idx = ctx.nodes.push(
-                                            Node::TresOp(
-                                                TresOperation::TernCond,
-                                                cond_node_idx,
-                                                if_idx,
-                                                else_idx));
-                                        return Some(FnReturn::Value(
-                                            Var::Node(tern_node_idx.0)));
-                                    }
-                                    _ => {
-                                        panic!(
-                                            "else branch is not a return in ternary operation: {}", call_stack.join(" -> "));
-                                    }
-                                }
-                            }
-                        }
-                        _ => {
-                            panic!(
-                                "expected store operation in ternary operation of branch 'if': {}:{}",
-                                call_stack.join(" -> "),
-                                branch_bucket.if_branch[0].get_line());
-                        }
-                    };
-                    let (var_else, var_else_idx) = if branch_bucket.else_branch.is_empty() {
-                        let prev = fn_vars[var_if_idx].as_ref().unwrap_or_else(|| panic!(
-                            "variable is not set before ternary operation: {}", call_stack.join(" -> ")));
-                        (prev.clone(), var_if_idx)
-                    } else {
-                        match *branch_bucket.else_branch[0] {
-                            Instruction::Store(ref store_bucket) => {
-                                store_function_variable(
-                                    store_bucket, fn_vars, ctx.nodes, call_stack)
-                            }
-                            _ => {
-                                panic!(
-                                    "expected store operation in ternary operation of branch 'else': {}",
-                                    call_stack.join(" -> "));
-                            }
-                        }
-                    };
-                    assert_eq!(
-                        var_if_idx, var_else_idx,
-                        "in ternary operation if and else branches must store to the same variable");
 
-                    let if_node_idx = node_from_var(&var_if, ctx.nodes);
-                    let else_node_idx = node_from_var(&var_else, ctx.nodes);
-                    let tern_node_idx = ctx.nodes.push(Node::TresOp(
-                        TresOperation::TernCond, cond_node_idx, if_node_idx,
-                        else_node_idx));
-                    fn_vars[var_if_idx] = Some(Var::Node(tern_node_idx.0));
+                    let vars_before = fn_vars.clone();
+
+                    let mut if_ret: Option<FnReturn<T>> = None;
+                    for inst in &branch_bucket.if_branch {
+                        if let Some(r) = process_function_instruction(
+                            ctx, inst, fn_vars, call_stack, pending_returns) {
+                            if_ret = Some(r);
+                            break;
+                        }
+                    }
+                    let vars_after_if = fn_vars.clone();
+                    let if_ret_var = if_ret.map(
+                        |r| fn_return_to_var(r, &vars_after_if, call_stack));
+
+                    *fn_vars = vars_before.clone();
+                    let mut else_ret: Option<FnReturn<T>> = None;
+                    for inst in &branch_bucket.else_branch {
+                        if let Some(r) = process_function_instruction(
+                            ctx, inst, fn_vars, call_stack, pending_returns) {
+                            else_ret = Some(r);
+                            break;
+                        }
+                    }
+                    let vars_after_else = fn_vars.clone();
+                    let else_ret_var = else_ret.map(
+                        |r| fn_return_to_var(r, &vars_after_else, call_stack));
+
+                    match (if_ret_var, else_ret_var) {
+                        (Some(vif), Some(velse)) => {
+                            // Both branches unconditionally return - nothing
+                            // after this statement is reachable either way,
+                            // so the ternary of the two return values IS
+                            // this whole statement's result. Propagate it up
+                            // immediately, same as the function's ordinary
+                            // Instruction::Return handling.
+                            let if_idx = node_from_var(&vif, ctx.nodes);
+                            let else_idx = node_from_var(&velse, ctx.nodes);
+                            let tern_node_idx = ctx.nodes.push(Node::TresOp(
+                                TresOperation::TernCond, cond_node_idx,
+                                if_idx, else_idx));
+                            return Some(FnReturn::Value(
+                                Var::Node(tern_node_idx.0)));
+                        }
+                        (Some(vif), None) => {
+                            // If-branch always returns, else-branch (which
+                            // may be empty) falls through. Defer the early
+                            // return via pending_returns - resolved against
+                            // the function's eventual real return value in
+                            // finalize_function_return - and continue with
+                            // the else-branch's variable state, since that's
+                            // what's actually reachable when cond is false.
+                            pending_returns.push((cond_node_idx, vif));
+                            *fn_vars = vars_after_else;
+                        }
+                        (None, Some(velse)) => {
+                            // Symmetric case: pending_returns is always
+                            // "cond true -> early return", so negate the
+                            // condition for an else-only return.
+                            let not_cond_idx = ctx.nodes.push(
+                                Node::UnoOp(UnoOperation::Lnot, cond_node_idx)).0;
+                            pending_returns.push((not_cond_idx, velse));
+                            *fn_vars = vars_after_if;
+                        }
+                        (None, None) => {
+                            // Neither branch returns - merge local variable
+                            // state var-by-var. fn_vars currently holds the
+                            // else-branch's post-state (from the reset+run
+                            // above); merge_ternary_fn_vars overwrites it in
+                            // place with the reconciled result.
+                            merge_ternary_fn_vars(
+                                ctx, cond_node_idx, &vars_before,
+                                &vars_after_if, &vars_after_else, fn_vars,
+                                call_stack);
+                        }
+                    }
                 }
                 Err(e) => {
                     panic!(
