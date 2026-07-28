@@ -1,6 +1,6 @@
 use compiler::circuit_design::template::TemplateCode;
 use compiler::compiler_interface::{run_compiler, Circuit, Config, VCP};
-use compiler::intermediate_representation::ir_interface::{AccessType, AddressType, BranchBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnBucket, ReturnType, SizeOption, StatusInput, StoreBucket, ValueBucket, ValueType};
+use compiler::intermediate_representation::ir_interface::{AccessType, AddressType, BranchBucket, CallBucket, ComputeBucket, CreateCmpBucket, FinalData, InputInformation, Instruction, InstructionPointer, LoadBucket, LocationRule, ObtainMeta, OperatorType, ReturnBucket, ReturnType, SizeOption, StatusInput, StoreBucket, ValueBucket, ValueType};
 use constraint_generation::{build_circuit, BuildConfig};
 use program_structure::error_definition::Report;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1754,6 +1754,79 @@ fn store_function_variable<T: FieldOps + 'static, NS: NodesStorage + 'static>(
     (v, lvar_idx)
 }
 
+// Runs a function call that is itself the single instruction of a ternary
+// operation's if/else branch (e.g. `ret = someFn(...)` inside a signal-
+// dependent `if`). Mirrors store_function_variable's contract/signature so
+// both can be used interchangeably by the ternary-branch matcher below, but
+// where store_function_variable pulls (Var, lvar_idx) out of a plain
+// Instruction::Store, this evaluates the call (same logic as the
+// Instruction::Call arm of process_function_instruction) and pulls
+// (Var, lvar_idx) out of its ReturnType::Final destination info instead of
+// writing the call's result into fn_vars directly - the caller still needs
+// the raw Var to combine with the other branch into a TernCond node first.
+fn call_function_for_ternary<T: FieldOps + 'static, NS: NodesStorage + 'static>(
+    ctx: &mut BuildCircuitContext<T, NS>, call_bucket: &CallBucket,
+    fn_vars: &mut Vec<Option<Var<T>>>, call_stack: &Vec<String>) -> (Var<T>, usize) {
+
+    let mut new_fn_vars: Vec<Option<Var<T>>> = vec![None; call_bucket.arena_size];
+
+    let mut count: usize = 0;
+    for (idx, inst2) in call_bucket.arguments.iter().enumerate() {
+        let arg_size =
+            expect_single_size(&call_bucket.argument_types[idx].size);
+        let args = calc_function_expression_n(
+            inst2, fn_vars, ctx.nodes, arg_size, call_stack);
+        for arg in args {
+            new_fn_vars[count] = Some(arg);
+            count += 1;
+        }
+    }
+
+    let r = run_function(ctx, &call_bucket.symbol, &mut new_fn_vars, call_stack);
+
+    let final_data = match call_bucket.return_info {
+        ReturnType::Intermediate { .. } => {
+            panic!(
+                "intermediate return is not supported for a function call \
+                 inside a ternary operation branch: {}",
+                call_stack.join(" -> "));
+        }
+        ReturnType::Final(ref final_data) => final_data,
+    };
+
+    assert!(matches!(final_data.dest_address_type, AddressType::Variable),
+            "functions can store only inside variables: dest_address_type: {}",
+            final_data.dest_address_type.to_string());
+
+    let (location, template_header) = match &final_data.dest {
+        LocationRule::Indexed { location, template_header } => (location, template_header),
+        LocationRule::Mapped { .. } => {
+            panic!("location rule supposed to be Indexed for variables");
+        }
+    };
+
+    let lvar_idx = calc_function_expression(location, fn_vars, ctx.nodes, call_stack)
+        .must_const_usize(ctx.nodes, call_stack);
+
+    let dest_size = expect_single_size(&final_data.context.size);
+    assert_eq!(
+        dest_size, 1,
+        "variable size in ternary expression must be 1: {}, {}:{}",
+        template_header.as_ref().unwrap_or(&"-".to_string()),
+        call_stack.join(" -> "), call_bucket.get_line());
+
+    let v = match r {
+        FnReturn::FnVar { idx, ln } => {
+            assert_eq!(ln, 1);
+            new_fn_vars[idx].clone().unwrap_or_else(|| panic!(
+                "return value is not set {}: {}", idx, call_stack.join(" -> ")))
+        }
+        FnReturn::Value(v) => v,
+    };
+
+    (v, lvar_idx)
+}
+
 fn process_function_instruction<T, NS>(
     ctx: &mut BuildCircuitContext<T, NS>, inst: &InstructionPointer,
     fn_vars: &mut Vec<Option<Var<T>>>,
@@ -1856,6 +1929,10 @@ where
                             store_function_variable(
                                 store_bucket, fn_vars, ctx.nodes, call_stack)
                         }
+                        Instruction::Call(ref call_bucket) => {
+                            call_function_for_ternary(
+                                ctx, call_bucket, fn_vars, call_stack)
+                        }
                         Instruction::Return(ref return_bucket) => {
                             let ret = build_return(
                                 return_bucket, fn_vars, ctx.nodes, call_stack);
@@ -1908,6 +1985,10 @@ where
                             Instruction::Store(ref store_bucket) => {
                                 store_function_variable(
                                     store_bucket, fn_vars, ctx.nodes, call_stack)
+                            }
+                            Instruction::Call(ref call_bucket) => {
+                                call_function_for_ternary(
+                                    ctx, call_bucket, fn_vars, call_stack)
                             }
                             _ => {
                                 panic!(
